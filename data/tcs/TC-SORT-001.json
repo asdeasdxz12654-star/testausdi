@@ -1,0 +1,15 @@
+{
+  "id": "TC-SORT-001",
+  "title": "가격 낮은 순 정렬 시 최저가 상품이 첫 번째로 노출",
+  "priority": "P2",
+  "automation": "적합",
+  "tags": ["regression"],
+  "reqIds": ["PRD-04"],
+  "platforms": ["pc", "mw"],
+  "precondition": "로그인 상태",
+  "steps": [
+    { "action": "flow", "target": "flow.login" },
+    { "action": "select", "target": "inventory.sort", "value": "lohi" },
+    { "action": "assertText", "target": "inventory.firstPrice", "value": "$7.99" }
+  ]
+}

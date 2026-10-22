@@ -1,0 +1,13 @@
+{
+  "account": {
+    "id": "standard_user",
+    "password": "secret_sauce",
+    "locked": "locked_out_user",
+    "problem": "problem_user"
+  },
+  "checkout": {
+    "firstName": "길동",
+    "lastName": "홍",
+    "postalCode": "06236"
+  }
+}

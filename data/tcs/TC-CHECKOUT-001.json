@@ -1,0 +1,22 @@
+{
+  "id": "TC-CHECKOUT-001",
+  "title": "상품 1개 주문 완료",
+  "priority": "P1",
+  "automation": "적합",
+  "tags": ["smoke", "regression"],
+  "reqIds": ["ORD-01"],
+  "platforms": ["pc", "mw"],
+  "precondition": "로그인 상태, 장바구니 비어 있음",
+  "steps": [
+    { "action": "flow", "target": "flow.login" },
+    { "action": "tap", "target": "inventory.addBackpack" },
+    { "action": "tap", "target": "header.cartLink" },
+    { "action": "tap", "target": "cart.checkout" },
+    { "action": "input", "target": "checkout.firstName", "value": "{{checkout.firstName}}" },
+    { "action": "input", "target": "checkout.lastName", "value": "{{checkout.lastName}}" },
+    { "action": "input", "target": "checkout.postalCode", "value": "{{checkout.postalCode}}" },
+    { "action": "tap", "target": "checkout.continue" },
+    { "action": "tap", "target": "checkout.finish" },
+    { "action": "assertText", "target": "checkout.completeHeader", "value": "Thank you for your order!" }
+  ]
+}

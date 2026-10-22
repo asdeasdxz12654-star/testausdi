@@ -1,0 +1,12 @@
+{
+  "flow.login": {
+    "label": "표준 계정으로 로그인",
+    "steps": [
+      { "action": "open", "target": "screen.login" },
+      { "action": "input", "target": "login.id", "value": "{{account.id}}" },
+      { "action": "input", "target": "login.pw", "value": "{{account.password}}" },
+      { "action": "tap", "target": "login.submit" },
+      { "action": "assertVisible", "target": "inventory.title" }
+    ]
+  }
+}

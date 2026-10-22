@@ -1,0 +1,19 @@
+{
+  "id": "TC-LOGIN-001",
+  "title": "정상 계정으로 로그인 시 상품 목록 진입",
+  "priority": "P1",
+  "automation": "적합",
+  "tags": ["smoke", "regression"],
+  "reqIds": ["LGN-01"],
+  "platforms": ["pc", "mw", "android", "ios"],
+  "precondition": "로그아웃 상태, 테스트 계정 보유",
+  "steps": [
+    { "action": "open", "target": "screen.login" },
+    { "action": "input", "target": "login.id", "value": "{{account.id}}" },
+    { "action": "input", "target": "login.pw", "value": "{{account.password}}" },
+    { "action": "hideKeyboard" },
+    { "action": "tap", "target": "login.submit" },
+    { "action": "assertUrl", "value": "/inventory.html" },
+    { "action": "assertText", "target": "inventory.title", "value": "Products" }
+  ]
+}

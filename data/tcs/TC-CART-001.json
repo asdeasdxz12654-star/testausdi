@@ -1,0 +1,17 @@
+{
+  "id": "TC-CART-001",
+  "title": "상품 담기·빼기 시 장바구니 배지 수량 반영",
+  "priority": "P1",
+  "automation": "적합",
+  "tags": ["smoke", "regression"],
+  "reqIds": ["CRT-01"],
+  "platforms": ["pc", "mw"],
+  "precondition": "로그인 상태, 장바구니 비어 있음",
+  "steps": [
+    { "action": "flow", "target": "flow.login" },
+    { "action": "tap", "target": "inventory.addBackpack" },
+    { "action": "assertText", "target": "header.cartBadge", "value": "1" },
+    { "action": "tap", "target": "inventory.removeBackpack" },
+    { "action": "assertHidden", "target": "header.cartBadge" }
+  ]
+}

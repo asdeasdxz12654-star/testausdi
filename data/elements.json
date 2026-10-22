@@ -1,0 +1,27 @@
+{
+  "screens": {
+    "screen.login": { "label": "로그인", "web": "/" },
+    "screen.inventory": { "label": "상품 목록", "web": "/inventory.html" },
+    "screen.cart": { "label": "장바구니", "web": "/cart.html" }
+  },
+  "elements": {
+    "login.id": { "label": "아이디 입력창", "web": { "testId": "username" }, "android": null, "ios": null },
+    "login.pw": { "label": "비밀번호 입력창", "web": { "testId": "password" }, "android": null, "ios": null },
+    "login.submit": { "label": "로그인 버튼", "web": { "testId": "login-button" }, "android": null, "ios": null },
+    "login.error": { "label": "로그인 에러 문구", "web": { "testId": "error" }, "android": null, "ios": null },
+    "inventory.title": { "label": "상품 목록 제목", "web": { "testId": "title" }, "android": null, "ios": null },
+    "inventory.sort": { "label": "정렬 선택", "web": { "testId": "product-sort-container" }, "android": null, "ios": null },
+    "inventory.firstPrice": { "label": "첫 번째 상품 가격", "web": { "css": "[data-test=\"inventory-item-price\"]", "nth": 0 }, "android": null, "ios": null },
+    "inventory.addBackpack": { "label": "백팩 담기 버튼", "web": { "testId": "add-to-cart-sauce-labs-backpack" }, "android": null, "ios": null },
+    "inventory.removeBackpack": { "label": "백팩 빼기 버튼", "web": { "testId": "remove-sauce-labs-backpack" }, "android": null, "ios": null },
+    "header.cartBadge": { "label": "장바구니 수량 배지", "web": { "testId": "shopping-cart-badge" }, "android": null, "ios": null },
+    "header.cartLink": { "label": "장바구니 아이콘", "web": { "testId": "shopping-cart-link" }, "android": null, "ios": null },
+    "cart.checkout": { "label": "결제하기 버튼", "web": { "testId": "checkout" }, "android": null, "ios": null },
+    "checkout.firstName": { "label": "이름 입력창", "web": { "testId": "firstName" }, "android": null, "ios": null },
+    "checkout.lastName": { "label": "성 입력창", "web": { "testId": "lastName" }, "android": null, "ios": null },
+    "checkout.postalCode": { "label": "우편번호 입력창", "web": { "testId": "postalCode" }, "android": null, "ios": null },
+    "checkout.continue": { "label": "계속 버튼", "web": { "testId": "continue" }, "android": null, "ios": null },
+    "checkout.finish": { "label": "주문 완료 버튼", "web": { "testId": "finish" }, "android": null, "ios": null },
+    "checkout.completeHeader": { "label": "주문 완료 문구", "web": { "testId": "complete-header" }, "android": null, "ios": null }
+  }
+}

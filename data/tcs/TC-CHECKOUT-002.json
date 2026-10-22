@@ -1,0 +1,25 @@
+{
+  "id": "TC-CHECKOUT-002",
+  "title": "problem_user 계정으로 상품 1개 주문 완료",
+  "priority": "P2",
+  "automation": "적합",
+  "tags": ["regression", "demo-bug"],
+  "reqIds": ["ORD-01"],
+  "platforms": ["pc", "mw"],
+  "precondition": "saucedemo의 problem_user는 의도적으로 결함이 심어진 계정입니다. 결함 탐지·분류 흐름 확인용 예시 TC입니다.",
+  "steps": [
+    { "action": "open", "target": "screen.login" },
+    { "action": "input", "target": "login.id", "value": "{{account.problem}}" },
+    { "action": "input", "target": "login.pw", "value": "{{account.password}}" },
+    { "action": "tap", "target": "login.submit" },
+    { "action": "tap", "target": "inventory.addBackpack" },
+    { "action": "tap", "target": "header.cartLink" },
+    { "action": "tap", "target": "cart.checkout" },
+    { "action": "input", "target": "checkout.firstName", "value": "{{checkout.firstName}}" },
+    { "action": "input", "target": "checkout.lastName", "value": "{{checkout.lastName}}" },
+    { "action": "input", "target": "checkout.postalCode", "value": "{{checkout.postalCode}}" },
+    { "action": "tap", "target": "checkout.continue" },
+    { "action": "tap", "target": "checkout.finish" },
+    { "action": "assertText", "target": "checkout.completeHeader", "value": "Thank you for your order!" }
+  ]
+}

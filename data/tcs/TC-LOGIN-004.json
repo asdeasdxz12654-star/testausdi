@@ -1,0 +1,15 @@
+{
+  "id": "TC-LOGIN-004",
+  "title": "아이디 미입력 시 필수 입력 안내 노출",
+  "priority": "P2",
+  "automation": "적합",
+  "tags": ["regression"],
+  "reqIds": ["LGN-02"],
+  "platforms": ["pc", "mw"],
+  "precondition": "로그아웃 상태",
+  "steps": [
+    { "action": "open", "target": "screen.login" },
+    { "action": "tap", "target": "login.submit" },
+    { "action": "assertText", "target": "login.error", "value": "Epic sadface: Username is required" }
+  ]
+}
