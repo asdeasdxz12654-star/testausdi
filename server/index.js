@@ -12,6 +12,7 @@ const { precheck } = require('./precheck');
 const { CLASSIFICATIONS, ISSUE_TYPE } = require('./classify');
 const issuesLib = require('./issues');
 const runner = require('./runner');
+const importer = require('./importer');
 const pkg = require('../package.json');
 
 const MIME = {
@@ -27,13 +28,13 @@ function route(method, pattern, handler) {
   routes.push({ method, re, keys, handler });
 }
 
-function readBody(req) {
+function readBody(req, limitMb = 2) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > 2 * 1024 * 1024) { reject(new HttpError(413, '요청이 너무 큽니다')); req.destroy(); return; }
+      if (size > limitMb * 1024 * 1024) { reject(new HttpError(413, `요청이 너무 큽니다 (최대 ${limitMb}MB)`)); req.destroy(); return; }
       chunks.push(c);
     });
     req.on('end', () => {
@@ -168,6 +169,63 @@ route('PUT', '/api/runs/:id/results/:key', ({ id, key }, body) => {
   return runner.withSummary(run);
 });
 
+// ---- 엑셀 가져오기 ----
+// Google 스프레드시트는 열 배치를 바꿀 때마다 다시 받지 않도록 10분간 보관한다
+const sheetCache = new Map();
+async function googleSheet(url, refresh) {
+  const hit = sheetCache.get(url);
+  if (hit && !refresh && Date.now() - hit.at < 10 * 60 * 1000) return hit;
+  const got = await importer.fetchGoogleSheet(url);
+  const entry = { ...got, at: Date.now() };
+  sheetCache.set(url, entry);
+  return entry;
+}
+
+route('POST', '/api/import/preview', async (_, body) => {
+  let buffer;
+  let fileName = body.fileName;
+  let sourceUrl = null;
+  if (body.url) {
+    const g = await googleSheet(body.url, body.refresh);
+    buffer = g.buffer;
+    fileName = g.fileName;
+    sourceUrl = String(body.url).trim();
+  } else {
+    if (!body.data) throw new HttpError(400, '파일이 없습니다');
+    if (!/\.(xlsx|csv|tsv|txt)$/i.test(fileName || '')) throw new HttpError(400, '.xlsx, .csv, .tsv 파일만 가져올 수 있습니다. .xls는 엑셀에서 "다른 이름으로 저장 → Excel 통합 문서(.xlsx)"로 바꿔 주세요');
+    buffer = Buffer.from(body.data, 'base64');
+  }
+  const config = store.getConfig();
+  return importer.parseWorkbook(buffer, {
+    fileName, sourceUrl, sheet: body.sheet, mapping: body.mapping,
+    elements: store.getElements(), existingIds: store.listTcs().map((t) => t.id),
+    defaultPlatforms: (config.import && config.import.defaultPlatforms) || ['pc', 'mw'],
+  });
+});
+
+route('POST', '/api/import/commit', (_, body) => {
+  if (!Array.isArray(body.tcs) || !body.tcs.length) throw new HttpError(400, '가져올 TC를 하나 이상 고르세요');
+  const c = ctx();
+  const existing = new Set(store.listTcs().map((t) => t.id));
+  const result = { added: [], updated: [], skipped: [], failed: [] };
+  for (const raw of body.tcs) {
+    try {
+      const tc = validateTc(raw, c);
+      if (existing.has(tc.id) && !body.overwrite) { result.skipped.push({ id: tc.id, reason: '같은 ID가 이미 있습니다' }); continue; }
+      store.saveTc(tc);
+      (existing.has(tc.id) ? result.updated : result.added).push(tc.id);
+      existing.add(tc.id);
+    } catch (e) {
+      result.failed.push({ id: raw && raw.id, reason: e.message });
+    }
+  }
+  return result;
+});
+
+route('GET', '/api/import/template', async () => ({
+  download: { buffer: Buffer.from(await importer.templateWorkbook()), name: 'AutoTC_TC양식.xlsx', asciiName: 'AutoTC_TC_template.xlsx', type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+}));
+
 route('GET', '/api/issues', () => store.getIssues());
 route('PUT', '/api/issues/:id', ({ id }, body) => {
   const issues = store.getIssues();
@@ -188,8 +246,17 @@ async function handle(req, res) {
     const m = pathname.match(r.re);
     const params = Object.fromEntries(r.keys.map((k, i) => [k, m[i + 1]]));
     try {
-      const body = req.method === 'GET' ? {} : await readBody(req);
+      // 엑셀 업로드는 base64로 오므로 한도를 늘린다
+      const body = req.method === 'GET' ? {} : await readBody(req, pathname.startsWith('/api/import/') ? 20 : 2);
       const data = await r.handler(params, body, url);
+      if (data && data.download) {
+        res.writeHead(200, {
+          'Content-Type': data.download.type,
+          'Content-Disposition': `attachment; filename="${data.download.asciiName}"; filename*=UTF-8''${encodeURIComponent(data.download.name)}`,
+          'Content-Length': data.download.buffer.length,
+        });
+        return res.end(data.download.buffer);
+      }
       return sendJson(res, 200, data);
     } catch (e) {
       if (!(e instanceof HttpError)) console.error(e);

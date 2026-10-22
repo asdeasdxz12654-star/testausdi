@@ -132,10 +132,10 @@ async function route() {
   const v = view || 'dash';
   window.onbeforeunload = null;
   document.querySelectorAll('#nav a').forEach((a) => {
-    const active = a.dataset.view === v || (v === 'result' && a.dataset.view === 'dash');
+    const active = a.dataset.view === v || (v === 'result' && a.dataset.view === 'dash') || (v === 'import' && a.dataset.view === 'tcs');
     if (active) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   });
-  const views = { dash: renderDash, tcs: () => renderTcs(rest[0]), elements: renderElements, devices: renderDevices, issues: renderIssues, result: () => renderResult(rest[0], rest[1]) };
+  const views = { dash: renderDash, tcs: () => renderTcs(rest[0]), import: renderImport, elements: renderElements, devices: renderDevices, issues: renderIssues, result: () => renderResult(rest[0], rest[1]) };
   await (views[v] || renderDash)();
 }
 
@@ -348,7 +348,8 @@ async function renderTcs(id) {
   };
   search.addEventListener('input', fill);
   fill();
-  const side = h('section', { class: 'card stack' }, h('div', { class: 'row between' }, h('h2', {}, `TC ${S.tcs.length}건`), h('a', { class: 'btn small', href: '#tcs/new' }, '새 TC')), search, list);
+  const side = h('section', { class: 'card stack' }, h('div', { class: 'row between' }, h('h2', {}, `TC ${S.tcs.length}건`),
+    h('div', { class: 'row' }, h('a', { class: 'btn small', href: '#import' }, 'TC 가져오기'), h('a', { class: 'btn small', href: '#tcs/new' }, '새 TC'))), search, list);
   app().replaceChildren(h('div', { class: 'split' }, side, S.draft ? tcEditor() : h('div', { class: 'empty' }, 'TC가 없습니다. 새 TC를 만들어 보세요.')));
 }
 
@@ -438,12 +439,161 @@ function tcEditor() {
       !isNew ? confirmButton('삭제', async () => { if (await guard(() => api('DELETE', `/api/tcs/${encodeURIComponent(d.id)}`))) { S.tcs = await api('GET', '/api/tcs'); S.draftId = null; S.draft = null; S.dirty = false; toast('삭제했습니다'); location.hash = '#tcs'; renderTcs(); } }) : null,
       h('button', { class: 'btn primary', type: 'button', onclick: save }, '저장'))),
     form,
+    d.source ? h('details', { class: 'notice', open: d.automation === '수동 유지' },
+      h('summary', {}, `${d.source.url ? '스프레드시트' : '엑셀'} 원문 · ${d.source.file} ${d.source.sheet} ${d.source.row}행${d.source.originalId ? ` · 원래 ID ${d.source.originalId}` : ''}`),
+      d.source.url ? h('div', { style: 'margin-top:6px' }, h('a', { href: d.source.url, target: '_blank', rel: 'noopener' }, '원본 시트 열기')) : null,
+      h('div', { class: 'grid2', style: 'margin-top:8px' },
+        h('div', {}, h('div', { class: 'sub' }, '테스트 절차'), h('pre', { style: 'white-space:pre-wrap' }, d.source.steps || '-')),
+        h('div', {}, h('div', { class: 'sub' }, '기대결과'), h('pre', { style: 'white-space:pre-wrap' }, d.source.expected || '-'))),
+      h('div', { class: 'sub', style: 'margin-top:6px' }, '원문을 보고 아래 스텝을 채운 뒤 자동화를 "적합"으로 바꾸면 실행 대상이 됩니다')) : null,
     h('div', { class: 'row between' }, h('h3', {}, `스텝 ${d.steps.length}개`), h('span', { class: 'sub' }, '점은 플랫폼 지원 여부 (PC · MW · 안드로이드 · 아이폰)')),
     h('div', { class: 'tbl' }, h('table', {}, h('thead', {}, h('tr', {}, ['#', '액션', '대상', '값', '지원', ''].map((t) => h('th', {}, t)))), stepsBody)),
     h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: () => { d.steps.push({ action: 'tap', target: Object.keys(S.elements.elements)[0] }); mark(); drawSteps(); } }, '스텝 추가'),
       h('span', { class: 'sub' }, '값에 {{account.id}}처럼 쓰면 data/testdata.json 값으로 바뀌고, 리포트에는 실제 값 대신 이름만 남습니다')),
     h('div', { class: 'row between' }, h('h3', {}, '엔진별 코드'), h('button', { class: 'btn small', type: 'button', onclick: loadPreview }, '코드 보기')),
     previewBox);
+}
+
+// ---------- 엑셀 가져오기 ----------
+const IMPORT_FIELDS = { id: 'TC ID', title: '제목', precondition: '사전조건', steps: '테스트 절차', expected: '기대결과', priority: '우선순위', platform: '플랫폼', reqIds: '요구사항 ID' };
+const colName = (i) => { let s = ''; for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s; return s; };
+
+function stepText(s) {
+  if (!s) return '';
+  const def = S.meta.actions[s.action];
+  const t = s.target ? (S.elements.elements[s.target] || S.elements.screens[s.target] || {}).label || s.target : '';
+  return `${def ? def.label : s.action}${t ? ` · ${t}` : ''}${s.value !== undefined ? ` = "${s.value}"` : ''}`;
+}
+
+async function previewImport(extra = {}) {
+  const imp = S.imp;
+  imp.loading = true;
+  renderImport();
+  const src = imp.url ? { url: imp.url } : { fileName: imp.fileName, data: imp.data };
+  const p = await guard(() => api('POST', '/api/import/preview', { ...src, sheet: imp.sheet, mapping: imp.mapping, ...extra }));
+  imp.loading = false;
+  if (!p && !imp.preview) imp.fileName = null;
+  if (p) {
+    imp.preview = p;
+    imp.fileName = p.fileName;
+    imp.sheet = p.sheet;
+    imp.selected = new Set(p.tcs.filter((t) => !t.exists).map((t) => t.tc.id));
+    imp.open = new Set();
+    imp.result = null;
+  }
+  renderImport();
+}
+
+function renderImport() {
+  S.imp = S.imp || {};
+  const imp = S.imp;
+  const fileInput = h('input', { type: 'file', id: 'importFile', accept: '.xlsx,.csv,.tsv', hidden: true, onchange: (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    if (f.size > 14 * 1024 * 1024) { toast('파일이 너무 큽니다 (최대 14MB)', true); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      S.imp = { fileName: f.name, data: String(reader.result).split(',')[1], sheet: undefined, mapping: undefined };
+      previewImport();
+    };
+    reader.onerror = () => toast('파일을 읽지 못했습니다', true);
+    reader.readAsDataURL(f);
+  } });
+
+  const intro = h('section', { class: 'card stack' },
+    h('div', { class: 'row between' }, h('div', {}, h('h2', {}, 'TC 가져오기 · 엑셀 · 스프레드시트'),
+      h('div', { class: 'sub' }, '머리글(TC ID, 테스트 항목, 테스트 절차, 기대결과, 우선순위, 플랫폼 등)로 열을 찾고, 절차·기대결과 문장을 요소 맵 이름으로 자동화 스텝으로 바꿉니다. 바꾸지 못한 문장이 있는 TC는 "수동 유지"로 원문과 함께 가져옵니다.')),
+      h('a', { class: 'btn', href: '/api/import/template', download: 'AutoTC_TC양식.xlsx' }, '양식 받기')),
+    h('div', { class: 'grid2' },
+      h('div', { class: 'stack' }, h('div', { class: 'sub' }, '파일 올리기 · 엑셀(.xlsx), CSV/TSV'),
+        h('div', { class: 'row' }, h('label', { class: 'btn primary', for: 'importFile', tabindex: '0', onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } } }, '파일 선택'), fileInput)),
+      h('form', { class: 'stack', onsubmit: (e) => {
+        e.preventDefault();
+        const url = e.target.querySelector('input').value.trim();
+        if (!url) { toast('Google 스프레드시트 링크를 붙여넣으세요', true); return; }
+        S.imp = { url, fileName: 'Google 스프레드시트', sheet: undefined, mapping: undefined };
+        previewImport();
+      } },
+        h('label', { class: 'sub', for: 'sheetUrl' }, 'Google 스프레드시트 링크 · 공유: 링크가 있는 모든 사용자(뷰어)'),
+        h('div', { class: 'row' },
+          h('input', { type: 'text', id: 'sheetUrl', placeholder: 'https://docs.google.com/spreadsheets/d/...', value: imp.url || '', style: 'flex:1;min-width:0' }),
+          h('button', { class: 'btn primary', type: 'submit' }, '불러오기')))),
+    imp.fileName ? h('div', { class: 'row' }, h('span', { class: 'sub' }, imp.loading ? `${imp.fileName} 읽는 중…` : `불러온 자료: ${imp.fileName}`),
+      imp.url && !imp.loading ? h('button', { class: 'btn small', type: 'button', onclick: () => previewImport({ refresh: true }) }, '다시 불러오기') : null) : null);
+
+  const parts = [intro];
+  const p = imp.preview;
+  if (p && !imp.loading) {
+    const sheetSel = p.sheets.length > 1 ? h('label', { class: 'field' }, '시트', h('select', { id: 'importSheet', onchange: (e) => { imp.sheet = e.target.value; imp.mapping = undefined; previewImport(); } }, p.sheets.map((s) => h('option', { value: s, selected: s === p.sheet }, s)))) : null;
+    const fieldSel = (f) => h('label', { class: 'field' }, IMPORT_FIELDS[f], h('select', { id: `map-${f}`, onchange: (e) => {
+      const m = { ...p.mapping };
+      if (e.target.value === '') delete m[f]; else m[f] = Number(e.target.value);
+      imp.mapping = m;
+      previewImport();
+    } }, h('option', { value: '' }, '(없음)'), p.headers.map((hd, i) => (hd ? h('option', { value: String(i), selected: p.mapping[f] === i }, `${colName(i)}열 · ${hd}`) : null))));
+    parts.push(h('section', { class: 'card stack' },
+      h('div', { class: 'row between' }, h('h3', {}, '열 배치'), h('span', { class: 'sub' }, `${p.sheet} 시트 · 머리글 ${p.headerRow || '-'}행${p.mapping.category && p.mapping.category.length ? ` · 분류(태그): ${p.mapping.category.map((i) => p.headers[i]).join(', ')}` : ''}`)),
+      h('div', { class: 'map-grid' }, sheetSel, Object.keys(IMPORT_FIELDS).map(fieldSel)),
+      p.warnings.length ? h('div', { class: 'errbox' }, p.warnings.join('\n')) : null));
+
+    if (p.tcs.length) {
+      const ok = p.tcs.filter((t) => t.tc.automation === '적합').length;
+      const existing = p.tcs.filter((t) => t.exists).length;
+      const allChecked = p.tcs.every((t) => imp.selected.has(t.tc.id));
+      const rows = [];
+      p.tcs.forEach((t) => {
+        const conv = t.lines.filter((l) => l.ok).length;
+        const opened = imp.open.has(t.tc.id);
+        rows.push(h('tr', {},
+          h('td', {}, h('input', { type: 'checkbox', 'aria-label': `${t.tc.id} 선택`, checked: imp.selected.has(t.tc.id), onchange: (e) => { if (e.target.checked) imp.selected.add(t.tc.id); else imp.selected.delete(t.tc.id); renderImport(); } })),
+          h('td', { class: 'mono' }, t.tc.id, t.exists ? h('div', { class: 'sub warn' }, '이미 있는 ID') : null),
+          h('td', {}, t.tc.title, t.tc.tags.length ? h('div', { class: 'sub' }, t.tc.tags.join(' · ')) : null),
+          h('td', {}, t.tc.priority),
+          h('td', {}, h('span', { class: 'dots' }, S.meta.platforms.map((pl) => h('i', { class: `${pl}${t.tc.platforms.includes(pl) ? ' on' : ''}`, title: PL(pl) })))),
+          h('td', { class: 'num' }, `${conv}/${t.lines.length}`),
+          h('td', {}, h('span', { class: `pill ${t.tc.automation === '적합' ? 's-Pass' : 's-Blocked'}` }, t.tc.automation === '적합' ? '자동화 가능' : '수동 유지')),
+          h('td', {}, h('button', { class: 'btn small', type: 'button', 'aria-expanded': String(opened), onclick: () => { if (opened) imp.open.delete(t.tc.id); else imp.open.add(t.tc.id); renderImport(); } }, opened ? '접기' : '변환 보기'))));
+        if (opened) {
+          rows.push(h('tr', {}, h('td', { colspan: '8', style: 'background:var(--sunken)' },
+            h('div', { class: 'stack' },
+              [...t.notes, ...t.problems].length ? h('div', { class: 'sub warn' }, [...t.notes, ...t.problems].join(' · ')) : null,
+              h('ol', { class: 'steps' }, t.lines.map((l) => h('li', { class: l.ok ? '' : 'failed' },
+                h('span', { class: `mark ${l.ok ? 'ok' : 'bad'}` }, l.ok ? '✓' : '✕'),
+                h('span', {}, h('span', { class: 'sub' }, l.kind === 'step' ? '절차 ' : '기대 '), l.text, h('div', { class: l.ok ? 'sub' : 'sub bad' }, l.ok ? `→ ${stepText(l.step)}` : l.reason)),
+                h('span', {}))))))));
+        }
+      });
+      const doImport = async () => {
+        const tcs = p.tcs.filter((t) => imp.selected.has(t.tc.id)).map((t) => t.tc);
+        const r = await guard(() => api('POST', '/api/import/commit', { tcs, overwrite: !!imp.overwrite }));
+        if (!r) return;
+        imp.result = r;
+        S.tcs = await api('GET', '/api/tcs');
+        toast(`추가 ${r.added.length} · 덮어쓰기 ${r.updated.length} · 건너뜀 ${r.skipped.length} · 실패 ${r.failed.length}`, r.failed.length > 0);
+        const ids = new Set(S.tcs.map((x) => x.id));
+        p.tcs.forEach((t) => { t.exists = ids.has(t.tc.id); });
+        imp.selected = new Set();
+        renderImport();
+      };
+      parts.push(h('section', { class: 'card stack' },
+        h('div', { class: 'row between' },
+          h('div', {}, h('h3', {}, `TC ${p.tcs.length}건`), h('div', { class: 'sub' }, `자동화 가능 ${ok}건 · 수동 유지 ${p.tcs.length - ok}건 · 이미 있는 ID ${existing}건`)),
+          h('div', { class: 'row' },
+            h('label', { class: 'check' }, h('input', { type: 'checkbox', id: 'importOverwrite', checked: !!imp.overwrite, onchange: (e) => { imp.overwrite = e.target.checked; } }), '같은 ID는 덮어쓰기'),
+            h('button', { class: 'btn primary', type: 'button', disabled: imp.selected.size === 0, onclick: doImport }, `선택한 ${imp.selected.size}건 가져오기`))),
+        imp.result ? h('div', { class: 'notice' },
+          `추가 ${imp.result.added.length}건, 덮어쓰기 ${imp.result.updated.length}건, 건너뜀 ${imp.result.skipped.length}건, 실패 ${imp.result.failed.length}건. `,
+          h('a', { href: `#tcs/${encodeURIComponent((imp.result.added[0] || imp.result.updated[0] || ''))}` }, 'TC 편집에서 보기'),
+          [...imp.result.skipped, ...imp.result.failed].map((x) => h('div', { class: 'sub' }, `${x.id}: ${x.reason}`))) : null,
+        h('div', { class: 'tbl' }, h('table', {},
+          h('thead', {}, h('tr', {}, h('th', {}, h('input', { type: 'checkbox', 'aria-label': '전체 선택', checked: allChecked, onchange: (e) => { imp.selected = new Set(e.target.checked ? p.tcs.map((t) => t.tc.id) : []); renderImport(); } })),
+            ['ID', '제목', '우선순위', '플랫폼', '변환', '결과', ''].map((x) => h('th', {}, x)))),
+          h('tbody', {}, rows)))));
+    } else {
+      parts.push(h('div', { class: 'empty' }, '가져올 TC를 찾지 못했습니다. 열 배치를 확인하세요.'));
+    }
+  }
+  app().replaceChildren(...parts);
 }
 
 // ---------- 요소 맵 ----------

@@ -73,6 +73,8 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 .form-grid { display: grid; grid-template-columns: 180px minmax(0, 1fr) 110px 120px; gap: 12px; }
 .form-grid .wide { grid-column: 1 / -1; }
+.map-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+label.btn { display: inline-block; }
 @media (max-width: 900px) { .form-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
 
 .tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }

@@ -14,7 +14,8 @@ function validateTc(tc, { elements, flows }) {
   if (tc.automation && !AUTOMATION.includes(tc.automation)) errors.push(`자동화 적합도는 ${AUTOMATION.join(', ')} 중 하나여야 합니다`);
   if (!Array.isArray(tc.platforms) || tc.platforms.length === 0) errors.push('플랫폼을 하나 이상 고르세요');
   else tc.platforms.forEach((p) => { if (!PLATFORMS.includes(p)) errors.push(`알 수 없는 플랫폼: ${p}`); });
-  if (!Array.isArray(tc.steps) || tc.steps.length === 0) errors.push('스텝을 하나 이상 추가하세요');
+  // 수동 유지 TC는 스텝 없이 저장할 수 있다 (엑셀에서 가져온 뒤 나중에 채우는 경우)
+  if (!Array.isArray(tc.steps) || (tc.steps.length === 0 && tc.automation !== '수동 유지')) errors.push('스텝을 하나 이상 추가하세요 (스텝 없이 두려면 자동화를 "수동 유지"로)');
   else {
     tc.steps.forEach((s, i) => {
       const no = i + 1;
@@ -27,6 +28,7 @@ function validateTc(tc, { elements, flows }) {
     });
   }
   if (errors.length) throw new HttpError(400, errors.join('\n'));
+  const src = tc.source && typeof tc.source === 'object' ? tc.source : null;
   return {
     id: tc.id,
     title: String(tc.title).trim(),
@@ -42,6 +44,13 @@ function validateTc(tc, { elements, flows }) {
       if (ACTIONS[s.action].value) out.value = String(s.value);
       return out;
     }),
+    // 엑셀 원문 (가져온 TC만)
+    ...(src ? {
+      source: {
+        file: String(src.file || ''), ...(src.url ? { url: String(src.url) } : {}), sheet: String(src.sheet || ''), row: Number(src.row) || null,
+        originalId: src.originalId ? String(src.originalId) : null, steps: String(src.steps || ''), expected: String(src.expected || ''),
+      },
+    } : {}),
   };
 }
 
