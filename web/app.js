@@ -135,7 +135,8 @@ async function route() {
     const active = a.dataset.view === v || (v === 'result' && a.dataset.view === 'dash') || (v === 'import' && a.dataset.view === 'tcs');
     if (active) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   });
-  const views = { dash: renderDash, tcs: () => renderTcs(rest[0]), import: renderImport, elements: renderElements, devices: renderDevices, issues: renderIssues, result: () => renderResult(rest[0], rest[1]) };
+  if (v !== 'mapping') { clearInterval(S.mapPoll); S.mapPoll = null; }
+  const views = { dash: renderDash, tcs: () => renderTcs(rest[0]), import: renderImport, mapping: () => renderMapping(rest[0]), elements: renderElements, devices: renderDevices, issues: renderIssues, result: () => renderResult(rest[0], rest[1]) };
   await (views[v] || renderDash)();
 }
 
@@ -594,6 +595,255 @@ function renderImport() {
     }
   }
   app().replaceChildren(...parts);
+}
+
+// ---------- 영역 매핑 ----------
+const CONF = { high: ['s-Pass', '높음'], mid: ['s-Flaky', '중간'], low: ['s-Fail', '낮음'], none: ['s-none', '근거 없음'] };
+const REVIEW_LABEL = { pending: '검토 대기', approved: '승인', edited: '수정 후 승인', inquiry: '기획 문의', rejected: '제외' };
+const confPill = (lv) => h('span', { class: `pill ${CONF[lv][0]}` }, CONF[lv][1]);
+
+function readFileB64(f) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1]);
+    r.onerror = () => reject(new Error(`${f.name}을(를) 읽지 못했습니다`));
+    r.readAsDataURL(f);
+  });
+}
+
+function aiSettingsCard(st, onSaved) {
+  const keyIn = h('input', { type: 'text', id: 'aiKey', placeholder: st.apiKey ? `저장됨 ${st.apiKey}` : 'sk-ant-...', autocomplete: 'off', style: 'width:100%' });
+  const figIn = h('input', { type: 'text', id: 'figmaToken', placeholder: st.figmaToken ? `저장됨 ${st.figmaToken}` : 'figd_... (선택)', autocomplete: 'off', style: 'width:100%' });
+  const consent = h('input', { type: 'checkbox', id: 'aiConsent', checked: st.consent });
+  const save = async () => {
+    const body = { consent: consent.checked };
+    if (keyIn.value.trim()) body.apiKey = keyIn.value.trim();
+    if (figIn.value.trim()) body.figmaToken = figIn.value.trim();
+    const r = await guard(() => api('PUT', '/api/ai/settings', body));
+    if (r) { toast('설정을 저장했습니다'); onSaved(r); }
+  };
+  return h('section', { class: 'card stack' },
+    h('h3', {}, '설정'),
+    h('div', { class: 'grid2' },
+      h('label', { class: 'field' }, `Claude API 키${st.apiKeySource === 'env' ? ' (환경변수 ANTHROPIC_API_KEY 사용 중)' : ''}`, keyIn),
+      h('label', { class: 'field' }, `피그마 개인 액세스 토큰${st.figmaTokenSource === 'env' ? ' (환경변수 FIGMA_TOKEN 사용 중)' : ''}`, figIn)),
+    h('label', { class: 'check' }, consent, '기획서·디자인 이미지·TC를 Claude API(Anthropic)로 보내는 것에 동의합니다'),
+    h('div', { class: 'sub' }, '고객사 자료는 외부 AI 전송이 허용되는지 먼저 확인하세요. 키와 토큰은 이 PC의 data/state/ai.json에만 저장되고 Git에는 올라가지 않습니다.'),
+    h('div', {}, h('button', { class: 'btn primary', type: 'button', onclick: save }, '설정 저장')));
+}
+
+async function renderMapping(pid) {
+  if (!pid) return renderMappingList();
+  const v = await guard(() => api('GET', `/api/mapping/${pid}`));
+  if (!v) { location.hash = '#mapping'; return; }
+  S.map = S.map && S.map.id === pid ? Object.assign(S.map, { v }) : { id: pid, v, sel: null, showGaps: false };
+  if (v.status === 'running' && !S.mapPoll) {
+    S.mapPoll = setInterval(async () => {
+      const nv = await api('GET', `/api/mapping/${pid}`).catch(() => null);
+      if (!nv) return;
+      S.map.v = nv;
+      if (nv.status !== 'running') {
+        clearInterval(S.mapPoll); S.mapPoll = null;
+        toast(nv.status === 'done' ? '분석을 마쳤습니다' : `분석 오류: ${nv.error}`, nv.status !== 'done');
+      }
+      if (location.hash.startsWith(`#mapping/${pid}`)) drawMapping();
+    }, 2000);
+  }
+  drawMapping();
+}
+
+async function renderMappingList() {
+  const [list, st] = await Promise.all([api('GET', '/api/mapping'), api('GET', '/api/ai/settings')]);
+  const nameIn = h('input', { type: 'text', id: 'mapName', placeholder: '예: 로그인·회원가입 v1.3', style: 'flex:1;min-width:0' });
+  app().replaceChildren(
+    h('section', { class: 'card stack' },
+      h('div', {}, h('h2', {}, 'TC 영역 매핑'), h('div', { class: 'sub' }, '기획서와 화면 디자인을 Claude가 읽고, TC가 어느 화면의 어느 영역을 다루는지 근거와 함께 찾습니다. 확신도는 규칙으로 계산하고, QA가 승인한 결과만 요소 맵과 TC에 반영합니다.')),
+      h('form', { class: 'row', onsubmit: async (e) => { e.preventDefault(); const p = await guard(() => api('POST', '/api/mapping', { name: nameIn.value })); if (p) location.hash = `#mapping/${p.id}`; } },
+        nameIn, h('button', { class: 'btn primary', type: 'submit' }, '새 매핑 만들기')),
+      list.length ? h('div', { class: 'tbl' }, h('table', {},
+        h('thead', {}, h('tr', {}, ['이름', '기획서', '화면', 'TC', '분석', '상태'].map((t) => h('th', {}, t)))),
+        h('tbody', {}, list.map((p) => h('tr', { class: 'clickable', tabindex: '0', onclick: () => { location.hash = `#mapping/${p.id}`; }, onkeydown: (e) => { if (e.key === 'Enter') location.hash = `#mapping/${p.id}`; } },
+          h('td', {}, p.name), h('td', { class: 'num' }, p.specs), h('td', { class: 'num' }, p.frames), h('td', { class: 'num' }, p.tcs), h('td', { class: 'num' }, p.results),
+          h('td', {}, { idle: '준비', running: '분석 중', done: '완료', error: '오류' }[p.status] || p.status))))))
+        : h('div', { class: 'empty' }, '아직 매핑이 없습니다. 이름을 넣고 새 매핑을 만드세요.')),
+    aiSettingsCard(st, () => renderMappingList()));
+}
+
+function drawMapping() {
+  const { v } = S.map;
+  const pid = v.id;
+  const busy = v.status === 'running';
+  const refresh = (nv) => { if (nv) { S.map.v = nv; drawMapping(); } };
+
+  // 자료
+  const specInput = h('input', { type: 'file', id: 'specFiles', multiple: true, hidden: true, accept: '.pdf,.png,.jpg,.jpeg,.webp,.txt,.md' });
+  const frameInput = h('input', { type: 'file', id: 'frameFiles', multiple: true, hidden: true, accept: '.png,.jpg,.jpeg,.webp' });
+  const upload = (kind) => async (e) => {
+    const files = [...e.target.files];
+    let last = null;
+    for (const f of files) {
+      toast(`${f.name} 올리는 중…`);
+      const data = await readFileB64(f).catch((err) => { toast(err.message, true); return null; });
+      if (!data) continue;
+      last = await guard(() => api('POST', `/api/mapping/${pid}/files`, { kind, fileName: f.name, data })) || last;
+    }
+    refresh(last);
+  };
+  specInput.addEventListener('change', upload('spec'));
+  frameInput.addEventListener('change', upload('frame'));
+  const figmaIn = h('input', { type: 'text', id: 'figmaUrl', placeholder: 'https://www.figma.com/design/...?node-id=...', value: v.figma ? v.figma.url : '', style: 'flex:1;min-width:0' });
+  const del = (fid) => h('button', { class: 'icon-btn', type: 'button', 'aria-label': '삭제', title: '삭제', disabled: busy, onclick: async () => refresh(await guard(() => api('DELETE', `/api/mapping/${pid}/files/${fid}`))) }, '✕');
+
+  const materials = h('section', { class: 'card stack' },
+    h('div', { class: 'row between' }, h('div', {}, h('a', { href: '#mapping' }, '← 매핑 목록'), h('h2', {}, v.name)),
+      h('span', { class: 'sub' }, `누적 사용 ${v.usage ? `${v.usage.calls}회 · 약 $${v.usd}` : '없음'}`)),
+    h('div', { class: 'grid2' },
+      h('div', { class: 'stack' },
+        h('div', { class: 'row between' }, h('h3', {}, `기획서 ${v.specs.length}개`), h('label', { class: 'btn small', for: 'specFiles' }, '기획서 올리기'), specInput),
+        h('div', { class: 'sub' }, 'PDF, 이미지, 텍스트(.txt/.md). PPT·워드는 PDF로 저장해 올립니다. 텍스트 기획서는 인용문을 원문과 대조합니다.'),
+        v.specs.length ? h('ul', { class: 'checks' }, v.specs.map((s) => h('li', { style: 'grid-template-columns:28px minmax(0,1fr) auto' }, h('span', { class: 'mono sub' }, s.id), h('span', {}, s.name, h('span', { class: 'sub' }, ` · ${s.kind}`)), del(s.id)))) : null),
+      h('div', { class: 'stack' },
+        h('div', { class: 'row between' }, h('h3', {}, `화면 디자인 ${v.frames.length}개`), h('label', { class: 'btn small', for: 'frameFiles' }, '캡처 올리기'), frameInput),
+        h('form', { class: 'row', onsubmit: async (e) => {
+          e.preventDefault();
+          toast('피그마에서 프레임을 가져오는 중…');
+          const r = await guard(() => api('POST', `/api/mapping/${pid}/figma`, { url: figmaIn.value }));
+          if (r) { toast(`프레임 ${r.added}개를 가져왔습니다${r.skipped ? ` (${r.skipped}개는 개수 제한으로 제외)` : ''}`); refresh(r); }
+        } }, figmaIn, h('button', { class: 'btn small', type: 'submit', disabled: busy }, '피그마에서 가져오기')),
+        h('div', { class: 'sub' }, '캡처 파일 이름이 화면 이름이 됩니다 (예: 01_Login_error.png). 에러·팝업 같은 상태 화면도 함께 넣으세요.'),
+        v.frames.length ? h('div', { class: 'thumbs' }, v.frames.map((f) => h('figure', {},
+          h('img', { src: `/mapping-files/${pid}/${f.file}`, alt: f.name, loading: 'lazy' }),
+          h('figcaption', { class: 'row between' }, h('span', {}, h('span', { class: 'mono sub' }, `${f.id} `), f.name, f.source === 'figma' ? h('span', { class: 'sub' }, ' · 피그마') : null), del(f.id))))) : null)));
+
+  // TC 선택
+  const chosen = new Set(v.tcIds);
+  const tcBox = h('div', { class: 'tc-pick' }, S.tcs.map((t) => h('label', { class: 'check' },
+    h('input', { type: 'checkbox', value: t.id, checked: chosen.has(t.id), disabled: busy }),
+    h('span', { class: 'mono sub' }, t.id), t.title,
+    t.automation === '수동 유지' ? h('span', { class: 'sub' }, ' · 수동 유지') : null,
+    v.results[t.id] ? h('span', { class: 'sub' }, ' · 분석됨') : null)));
+  const saveTcs = async () => {
+    const ids = [...tcBox.querySelectorAll('input:checked')].map((i) => i.value);
+    refresh(await guard(() => api('PUT', `/api/mapping/${pid}`, { tcIds: ids })));
+  };
+  const tcCard = h('section', { class: 'card stack' },
+    h('div', { class: 'row between' }, h('h3', {}, `분석할 TC ${v.tcIds.length}건`),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn small', type: 'button', disabled: busy, onclick: () => { tcBox.querySelectorAll('input').forEach((i) => { i.checked = true; }); } }, '전체 선택'),
+        h('button', { class: 'btn small primary', type: 'button', disabled: busy, onclick: saveTcs }, '선택 저장'))),
+    tcBox);
+
+  // 분석
+  const start = async (onlyNew) => {
+    const r = await guard(() => api('POST', `/api/mapping/${pid}/analyze`, { onlyNew }));
+    if (r) { toast('분석을 시작했습니다'); renderMapping(pid); }
+  };
+  const est = v.estimate;
+  const runCard = h('section', { class: 'card stack' },
+    h('div', { class: 'row between' }, h('h3', {}, '분석'),
+      busy ? h('span', { class: 'sub' }, `${v.phase || '분석 중'} · ${v.progress ? `${v.progress.done}/${v.progress.total}` : ''}`) : null),
+    busy && v.progress ? h('div', { class: 'bar' }, h('i', { class: 'Pass', style: `width:${(v.progress.done / Math.max(1, v.progress.total)) * 100}%` })) : null,
+    !busy ? h('div', { class: 'row' },
+      h('button', { class: 'btn primary', type: 'button', disabled: !est.calls, onclick: () => start(true) }, est.calls ? `새 TC 분석 (호출 ${est.calls}회, 약 $${est.usd})` : '새로 분석할 TC 없음'),
+      Object.keys(v.results).length ? h('button', { class: 'btn', type: 'button', onclick: () => start(false) }, `전체 다시 분석 (호출 ${v.estimateAll.calls}회, 약 $${v.estimateAll.usd})`) : null,
+      h('a', { class: 'btn small', href: '#mapping' }, '설정')) : null,
+    h('div', { class: 'sub' }, '비용은 Claude Opus 5.5 기준 대략값입니다. 기획서·디자인은 첫 호출 뒤 캐시되어 TC가 늘어도 자료 비용은 크게 늘지 않습니다.'),
+    v.error ? h('div', { class: 'errbox' }, v.error) : null,
+    v.lastRun && v.lastRun.errors.length && !busy ? h('div', { class: 'errbox' }, v.lastRun.errors.slice(0, 5).join('\n')) : null);
+
+  const parts = [materials, tcCard, runCard];
+  if (Object.keys(v.results).length) parts.push(reviewCard(v, refresh));
+  app().replaceChildren(...parts);
+}
+
+function reviewCard(v, refresh) {
+  const pid = v.id;
+  const results = Object.values(v.results);
+  const order = { none: 0, low: 1, mid: 2, high: 3 };
+  results.sort((a, b) => order[a.confidence.level] - order[b.confidence.level] || a.tcId.localeCompare(b.tcId));
+  if (!S.map.sel || !v.results[S.map.sel]) S.map.sel = results[0].tcId;
+  const r = v.results[S.map.sel];
+  const gaps = S.map.showGaps;
+  const frameId = gaps ? (S.map.gapFrame || (v.frames[0] && v.frames[0].id)) : (r.frame || (r.steps.find((s) => s.frame) || {}).frame);
+  const fr = v.frames.find((f) => f.id === frameId);
+
+  const list = h('ul', { class: 'tc-list', style: 'max-height:640px' }, results.map((x) => h('li', {},
+    h('a', { href: `#mapping/${pid}`, 'aria-current': String(!gaps && x.tcId === S.map.sel), onclick: (e) => { e.preventDefault(); S.map.sel = x.tcId; S.map.showGaps = false; drawMapping(); } },
+      h('span', { class: 'id' }, x.tcId), h('span', {}, x.title),
+      h('span', {}, confPill(x.confidence.level), h('span', { class: 'sub' }, ` ${REVIEW_LABEL[x.review.status]}${x.review.appliedAt ? ' · 반영됨' : ''}`))))));
+
+  // 화면 위 영역 표시
+  const boxes = gaps
+    ? v.coverage.uncovered.filter((e) => e.frame === frameId).map((e) => ({ box: e.box, label: e.name, cls: 'gap' }))
+    : r.steps.filter((s) => s.box && s.frame === frameId && s.box[2] * s.box[3] < 0.9).map((s) => ({ box: s.box, label: String(s.lineNo), cls: '' }));
+  const frameView = fr ? h('div', { class: 'stack' },
+    h('div', { class: 'row between' }, h('span', { class: 'sub' }, `${fr.id} · ${fr.name}`),
+      gaps && v.frames.length > 1 ? h('select', { 'aria-label': '화면 선택', onchange: (e) => { S.map.gapFrame = e.target.value; drawMapping(); } }, v.frames.map((f) => h('option', { value: f.id, selected: f.id === frameId }, f.name))) : null),
+    h('div', { class: 'frame-view' }, h('img', { src: `/mapping-files/${pid}/${fr.file}`, alt: fr.name }),
+      boxes.map((b) => h('div', { class: `ov ${b.cls}`, style: `left:${b.box[0] * 100}%;top:${b.box[1] * 100}%;width:${b.box[2] * 100}%;height:${b.box[3] * 100}%`, title: b.label }, h('span', {}, b.label)))))
+    : h('div', { class: 'empty' }, gaps ? '화면이 없습니다' : '이 TC의 화면을 찾지 못했습니다');
+
+  // 상세
+  const elOptions = Object.entries(S.elements.elements);
+  const edits = new Map();
+  const doReview = async (status) => {
+    const note = status === 'inquiry' ? noteIn.value : undefined;
+    const nv = await guard(() => api('PUT', `/api/mapping/${pid}/results/${encodeURIComponent(r.tcId)}`, { status, edits: [...edits.values()], note }));
+    if (nv) { toast(`${r.tcId}: ${REVIEW_LABEL[nv.results[r.tcId].review.status]}`); refresh(nv); }
+  };
+  const noteIn = h('input', { type: 'text', id: 'mapNote', placeholder: '기획 문의 내용 (예: 잠금 팝업 디자인 요청)', value: r.review.note || '', style: 'width:100%' });
+  const detail = gaps
+    ? h('div', { class: 'stack' }, h('h3', {}, `TC 없는 영역 ${v.coverage.uncovered.length}곳`),
+      h('div', { class: 'sub' }, '디자인에는 있지만 어떤 TC도 다루지 않는 버튼·입력창·링크·탭입니다. 다른 화면 TC에서 다루는지 확인하고, 없으면 TC 추가 대상으로 정리하세요.'),
+      h('ul', { class: 'checks' }, v.coverage.uncovered.map((e) => h('li', { style: 'grid-template-columns:minmax(0,1fr) auto' }, h('span', {}, `${e.frameName} · ${e.name}`), h('span', { class: 'sub' }, e.kind)))),
+      v.coverage.noEvidence.length ? h('div', { class: 'notice' }, `기획서 근거가 없는 TC: ${v.coverage.noEvidence.join(', ')}`) : null,
+      v.coverage.missingStates.length ? h('div', { class: 'notice' }, '디자인에 없는 상태: ', v.coverage.missingStates.map((m) => `${m.tcId}(${m.states.join(', ')})`).join(' · ')) : null)
+    : h('div', { class: 'stack' },
+      h('div', {}, h('div', { class: 'mono sub' }, r.tcId), h('b', {}, r.title)),
+      h('div', {}, confPill(r.confidence.level), ' ', h('span', { class: 'sub' }, r.confidence.reasons.join(' · '))),
+      h('ol', { class: 'steps' }, r.steps.map((s) => {
+        const sel = h('select', { 'aria-label': `${s.lineNo}번 요소`, onchange: (e) => {
+          const val = e.target.value;
+          edits.set(s.lineNo, val.startsWith('new:') ? { lineNo: s.lineNo, suggestedKey: val.slice(4) } : { lineNo: s.lineNo, elementKey: val });
+        } },
+        h('option', { value: '' }, '(요소 없음)'),
+        s.suggestedKey ? h('option', { value: `new:${s.suggestedKey}`, selected: !s.elementKey }, `새 요소 ${s.suggestedKey}`) : null,
+        elOptions.map(([k, el]) => h('option', { value: k, selected: k === s.elementKey }, `${el.label} · ${k}`)));
+        return h('li', { class: !s.box ? 'failed' : '' },
+          h('span', { class: 'mark mono' }, s.lineNo),
+          h('span', { class: 'stack', style: 'gap:4px' },
+            h('span', {}, h('span', { class: 'sub' }, s.kind === 'expected' ? '기대 ' : '절차 '), s.text),
+            h('span', { class: 'sub' }, `${s.name || '대상 못 찾음'} · 후보 ${s.candidates}개${s.designTextMatch === false && /"/.test(s.text) ? ` · 문구 불일치${s.textCheck === 'figma' ? '(피그마 대조)' : ''}` : ''}${s.note ? ` · ${s.note}` : ''}`),
+            sel),
+          h('span', {}));
+      })),
+      r.evidence.length ? h('div', { class: 'stack' }, h('div', { class: 'sub' }, '기획서 근거'), r.evidence.map((e) => h('div', { class: 'notice' },
+        h('b', {}, e.policyId || e.specName), e.page > 0 ? ` · ${e.page}쪽` : '', ` · ${e.verified ? '원문 확인됨' : '원문 대조 불가(PDF·이미지)'}`, h('div', {}, `"${e.quote}"`)))) : h('div', { class: 'sub warn' }, '기획서 근거 없음'),
+      r.missingInDesign.length ? h('div', { class: 'sub warn' }, `디자인에 없는 상태: ${r.missingInDesign.join(', ')}`) : null,
+      r.warnings.length ? h('div', { class: 'sub' }, `걸러낸 답변: ${r.warnings.join(' · ')}`) : null,
+      r.notes ? h('div', { class: 'sub' }, `메모: ${r.notes}`) : null,
+      noteIn,
+      h('div', { class: 'row' },
+        h('button', { class: 'btn primary', type: 'button', onclick: () => doReview('approved') }, '승인'),
+        h('button', { class: 'btn', type: 'button', onclick: () => doReview('inquiry') }, '기획 문의'),
+        h('button', { class: 'btn', type: 'button', onclick: () => doReview('rejected') }, '제외')));
+
+  const st = v.stats.high;
+  const approvedCount = results.filter((x) => x.review.status === 'approved' || x.review.status === 'edited').length;
+  return h('section', { class: 'card stack' },
+    h('div', { class: 'row between' }, h('h3', {}, '검토'),
+      h('div', { class: 'row' },
+        h('span', { class: 'sub' }, st && st.reviewed ? `"높음" 그대로 승인 ${st.approvedAsIs}/${st.reviewed}` : '"높음" 검토 전'),
+        h('button', { class: 'btn small', type: 'button', 'aria-pressed': String(gaps), onclick: () => { S.map.showGaps = !gaps; drawMapping(); } }, gaps ? 'TC별 보기' : `TC 없는 영역 ${v.coverage.uncovered.length}`),
+        h('button', { class: 'btn small primary', type: 'button', disabled: !approvedCount, onclick: async () => {
+          const out = await guard(() => api('POST', `/api/mapping/${pid}/apply`));
+          if (!out) return;
+          S.elements = await api('GET', '/api/elements');
+          S.tcs = await api('GET', '/api/tcs');
+          toast(`TC ${out.tcsUpdated.length}건 반영, 새 요소 ${out.elementsAdded.length}개 추가${out.skipped.length ? `, ${out.skipped.length}건 건너뜀` : ''}`);
+          renderMapping(pid);
+        } }, `승인한 ${approvedCount}건 반영`))),
+    h('div', { class: 'map3' }, list, frameView, detail));
 }
 
 // ---------- 요소 맵 ----------

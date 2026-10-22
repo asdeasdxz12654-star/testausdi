@@ -44,6 +44,13 @@ function validateTc(tc, { elements, flows }) {
       if (ACTIONS[s.action].value) out.value = String(s.value);
       return out;
     }),
+    // 영역 매핑에서 승인·반영된 화면·요소 (매핑한 TC만)
+    ...(tc.mapping && typeof tc.mapping === 'object' ? {
+      mapping: {
+        project: String(tc.mapping.project || ''), frame: String(tc.mapping.frame || ''), approvedAt: String(tc.mapping.approvedAt || ''),
+        elements: Array.isArray(tc.mapping.elements) ? tc.mapping.elements.map(String) : [],
+      },
+    } : {}),
     // 엑셀 원문 (가져온 TC만)
     ...(src ? {
       source: {

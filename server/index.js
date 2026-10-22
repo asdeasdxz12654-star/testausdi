@@ -13,11 +13,13 @@ const { CLASSIFICATIONS, ISSUE_TYPE } = require('./classify');
 const issuesLib = require('./issues');
 const runner = require('./runner');
 const importer = require('./importer');
+const ai = require('./ai');
+const mapping = require('./mapping');
 const pkg = require('../package.json');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml',
+  '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.pdf': 'application/pdf', '.svg': 'image/svg+xml',
   '.webm': 'video/webm', '.zip': 'application/zip', '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8', '.ico': 'image/x-icon',
 };
 
@@ -226,6 +228,24 @@ route('GET', '/api/import/template', async () => ({
   download: { buffer: Buffer.from(await importer.templateWorkbook()), name: 'AutoTC_TC양식.xlsx', asciiName: 'AutoTC_TC_template.xlsx', type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
 }));
 
+// ---- TC 영역 매핑 ----
+route('GET', '/api/ai/settings', () => ai.publicSettings());
+route('PUT', '/api/ai/settings', (_, body) => ai.saveSettings(body));
+route('GET', '/api/mapping', () => mapping.listProjects());
+route('POST', '/api/mapping', (_, body) => mapping.createProject(body.name));
+route('GET', '/api/mapping/:id', ({ id }) => mapping.view(id));
+route('PUT', '/api/mapping/:id', ({ id }, body) => { mapping.updateProject(id, body); return mapping.view(id); });
+route('DELETE', '/api/mapping/:id', ({ id }) => { mapping.deleteProject(id); return { ok: true }; });
+route('POST', '/api/mapping/:id/files', ({ id }, body) => { mapping.addFile(id, body); return mapping.view(id); });
+route('DELETE', '/api/mapping/:id/files/:fileId', ({ id, fileId }) => { mapping.removeFile(id, fileId); return mapping.view(id); });
+route('POST', '/api/mapping/:id/figma', async ({ id }, body) => {
+  const r = await mapping.addFigma(id, body.url);
+  return { ...mapping.view(id), added: r.added, skipped: r.skipped };
+});
+route('POST', '/api/mapping/:id/analyze', ({ id }, body) => { mapping.startAnalysis(id, body); return mapping.view(id); });
+route('PUT', '/api/mapping/:id/results/:tcId', ({ id, tcId }, body) => mapping.review(id, tcId, body));
+route('POST', '/api/mapping/:id/apply', ({ id }) => mapping.apply(id));
+
 route('GET', '/api/issues', () => store.getIssues());
 route('PUT', '/api/issues/:id', ({ id }, body) => {
   const issues = store.getIssues();
@@ -247,7 +267,9 @@ async function handle(req, res) {
     const params = Object.fromEntries(r.keys.map((k, i) => [k, m[i + 1]]));
     try {
       // 엑셀 업로드는 base64로 오므로 한도를 늘린다
-      const body = req.method === 'GET' ? {} : await readBody(req, pathname.startsWith('/api/import/') ? 20 : 2);
+      // 엑셀·기획서·디자인 업로드는 base64로 오므로 한도를 늘린다
+      const big = pathname.startsWith('/api/import/') || /^\/api\/mapping\/[^/]+\/files$/.test(pathname);
+      const body = req.method === 'GET' ? {} : await readBody(req, big ? 45 : 2);
       const data = await r.handler(params, body, url);
       if (data && data.download) {
         res.writeHead(200, {
@@ -265,6 +287,7 @@ async function handle(req, res) {
   }
   if (req.method !== 'GET') return sendJson(res, 405, { error: '허용되지 않는 요청입니다' });
   if (pathname.startsWith('/files/')) return sendFile(res, P.RUNS, pathname.slice('/files/'.length));
+  if (pathname.startsWith('/mapping-files/')) return sendFile(res, path.join(P.STATE, 'mapping'), pathname.slice('/mapping-files/'.length));
   return sendFile(res, P.WEB, pathname === '/' ? 'index.html' : pathname.slice(1));
 }
 

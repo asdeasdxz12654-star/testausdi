@@ -8,6 +8,7 @@
   "android": { "appId": "com.example.shop", "apkPath": "", "serial": "" },
   "ios": { "appId": "com.example.shop.ios", "agentUrl": "" },
   "run": { "retries": 1, "workers": 2, "timeoutMs": 45000, "actionTimeoutMs": 10000, "expectTimeoutMs": 5000, "mobileTimeoutMs": 300000 },
+  "ai": { "model": "claude-opus-5-5", "effort": "high" },
   "exitCriteria": { "p1FailMax": 0, "criticalOpenMax": 0, "flakyRateMax": 0.05, "blockedMax": 0 },
   "quarantine": { "window": 10, "flakyThreshold": 3 }
 }

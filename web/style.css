@@ -73,6 +73,23 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 .form-grid { display: grid; grid-template-columns: 180px minmax(0, 1fr) 110px 120px; gap: 12px; }
 .form-grid .wide { grid-column: 1 / -1; }
+.s-none { color: var(--fail); background: transparent; border: 1px dashed var(--fail); }
+.thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
+.thumbs figure { margin: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--sunken); min-width: 0; }
+.thumbs img { display: block; width: 100%; height: 140px; object-fit: cover; object-position: top; }
+.thumbs figcaption { padding: 4px 6px; font-size: 12px; gap: 4px; flex-wrap: nowrap; }
+.thumbs figcaption > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.tc-pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 6px 16px; max-height: 260px; overflow: auto; }
+.tc-pick label.check { display: grid; grid-template-columns: 18px 128px minmax(0, 1fr); align-items: start; gap: 6px; }
+.tc-pick label.check > input { margin-top: 4px; }
+.map3 { display: grid; grid-template-columns: 240px minmax(0, 360px) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 1100px) { .map3 { grid-template-columns: minmax(0, 1fr); } }
+.frame-view { position: relative; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--sunken); }
+.frame-view img { display: block; width: 100%; height: auto; }
+.ov { position: absolute; border: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 3px; }
+.ov.gap { border-style: dashed; border-color: var(--flaky); background: color-mix(in srgb, var(--flaky) 16%, transparent); }
+.ov span { position: absolute; top: -9px; left: -9px; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; white-space: nowrap; }
+.ov.gap span { background: var(--flaky); max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
 .map-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
 label.btn { display: inline-block; }
 @media (max-width: 900px) { .form-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
