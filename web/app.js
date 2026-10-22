@@ -252,6 +252,7 @@ async function renderResult(runId, key) {
   const video = r.attachments.find((a) => a.contentType && a.contentType.startsWith('video/'));
   const trace = r.attachments.find((a) => a.name === 'trace');
   const ctxFile = r.attachments.find((a) => a.name === 'error-context');
+  const logFiles = r.attachments.filter((a) => a.contentType === 'text/plain');
 
   const head = h('section', { class: 'card stack' },
     h('div', {}, h('a', { href: '#dash', onclick: () => { S.dashRunId = run.id; } }, `← ${run.id} ${run.label}`)),
@@ -300,12 +301,13 @@ async function renderResult(runId, key) {
 
   const right = h('div', { class: 'stack' });
   if (shot) right.append(h('section', { class: 'card stack' }, h('h3', {}, r.status === 'Pass' ? '마지막 화면' : '실패 시점 화면'), h('a', { href: shot.url, target: '_blank', rel: 'noopener' }, h('img', { class: 'shot', src: shot.url, alt: `${r.tcId} ${PL(r.platform)} 스크린샷` }))));
-  if (video || trace || ctxFile) {
+  if (video || trace || ctxFile || logFiles.length) {
     right.append(h('section', { class: 'card stack' }, h('h3', {}, '증적'),
       video ? h('video', { src: video.url, controls: true, style: 'width:100%;border-radius:8px' }) : null,
       h('div', { class: 'row' },
         video ? h('a', { class: 'btn small', href: video.url, target: '_blank', rel: 'noopener' }, '영상 열기') : null,
         ctxFile ? h('a', { class: 'btn small', href: ctxFile.url, target: '_blank', rel: 'noopener' }, '오류 시점 화면 구조') : null,
+        logFiles.map((a) => h('a', { class: 'btn small', href: a.url, target: '_blank', rel: 'noopener' }, a.name === 'logcat' ? 'logcat 로그' : a.name === 'maestro' ? 'Maestro 로그' : a.name)),
         trace ? h('a', { class: 'btn small', href: trace.url }, '트레이스 받기') : null),
       trace ? h('div', { class: 'sub' }, '트레이스는 https://trace.playwright.dev 에 끌어다 놓거나 npx playwright show-trace 로 엽니다') : null));
   }
@@ -421,7 +423,7 @@ function tcEditor() {
     previewBox.replaceChildren(
       h('div', { class: 'subtabs', role: 'tablist' }, S.meta.platforms.map((k) => h('button', { type: 'button', role: 'tab', 'aria-selected': String(k === S.previewTab), onclick: () => { S.previewTab = k; drawPreview(); } }, PL(k)))),
       p.error ? h('div', { class: 'errbox' }, p.error) : h('pre', {}, p.code),
-      h('div', { class: 'sub', style: 'margin-top:6px' }, S.previewTab === 'pc' || S.previewTab === 'mw' ? 'Playwright로 실행됩니다' : 'Maestro YAML 미리보기입니다. 앱 실행 어댑터는 다음 단계에서 붙습니다'));
+      h('div', { class: 'sub', style: 'margin-top:6px' }, { pc: 'Playwright로 실행됩니다', mw: 'Playwright 기기 에뮬레이션으로 실행됩니다', android: 'Maestro로 실행됩니다. 식별자 미부여 요소가 있으면 실행 시 Blocked 처리됩니다', ios: 'Maestro YAML 미리보기입니다. 아이폰 실행 어댑터는 다음 단계에서 붙습니다' }[S.previewTab]));
   };
   drawPreview();
   const loadPreview = async () => {
@@ -492,6 +494,7 @@ async function renderElements() {
     h('td', { class: 'mono' }, name),
     h('td', {}, h('input', { type: 'text', 'aria-label': `${name} 이름`, value: s.label, oninput: (ev) => { s.label = ev.target.value; mark(); } })),
     h('td', {}, h('input', { type: 'text', 'aria-label': `${name} 웹 경로`, value: s.web || '', oninput: (ev) => { s.web = ev.target.value; mark(); } })),
+    h('td', {}, h('input', { type: 'text', 'aria-label': `${name} 안드로이드 딥링크`, value: s.android || '', placeholder: '첫 화면이면 비워도 됨', oninput: (ev) => { if (ev.target.value.trim()) s.android = ev.target.value.trim(); else delete s.android; mark(); } })),
     h('td', { class: 'num' }, used[name] || 0))));
 
   const missing = (p) => Object.entries(data.elements).filter(([, e]) => !e[p]).map(([n, e]) => `${n} (${e.label})`);
@@ -503,7 +506,7 @@ async function renderElements() {
       h('div', { class: 'tbl' }, h('table', {}, h('thead', {}, h('tr', {}, ['논리 이름', '이름', '웹 방식', '웹 식별자 (PC · MW)', '안드로이드 id', '아이폰 id', '사용', ''].map((t) => h('th', {}, t)))), elRows)),
       h('div', { class: 'row' }, newName, addEl)),
     h('div', { class: 'grid2' },
-      h('section', { class: 'card stack' }, h('h3', {}, '화면'), h('div', { class: 'tbl' }, h('table', {}, h('thead', {}, h('tr', {}, ['논리 이름', '이름', '웹 경로', '사용'].map((t) => h('th', {}, t)))), scRows))),
+      h('section', { class: 'card stack' }, h('h3', {}, '화면'), h('div', { class: 'tbl' }, h('table', {}, h('thead', {}, h('tr', {}, ['논리 이름', '이름', '웹 경로', '안드로이드 딥링크', '사용'].map((t) => h('th', {}, t)))), scRows))),
       h('section', { class: 'card stack' }, h('div', { class: 'row between' }, h('h3', {}, '개발팀 요청 목록'), h('button', { class: 'btn small', type: 'button', onclick: () => copyText(requestText()) }, '요청문 복사')),
         h('div', { class: 'sub' }, `안드로이드 미부여 ${missing('android').length}개 · 아이폰 미부여 ${missing('ios').length}개`),
         h('pre', { style: 'max-height:240px' }, requestText()))));
@@ -514,7 +517,14 @@ async function renderElements() {
 const GUIDES = {
   pc: ['Chromium이 없으면 터미널에서 npx playwright install chromium 실행', '테스트 URL은 data/config.json의 baseURL'],
   mw: ['기기 프리셋은 data/config.json의 mw.devices (예: "Pixel 7", "iPhone 13")', 'iPhone 프리셋은 WebKit이 필요: npx playwright install webkit', '에뮬레이션은 실제 사파리·인앱 브라우저가 아니므로 핵심 TC는 실기기로 재확인'],
-  android: ['Android SDK Platform-Tools 설치 후 adb를 PATH에 추가', '폰: 설정 → 휴대전화 정보 → 빌드번호 7번 탭 → 개발자 옵션 → USB 디버깅 켜기', 'USB 연결 후 폰에 뜨는 "USB 디버깅 허용" 승인', '테스트 중 화면 자동 꺼짐 끄기'],
+  android: [
+    'Android SDK Platform-Tools 설치 후 adb를 PATH에 추가',
+    'Java 17 이상 설치 후 Maestro 설치 (maestro.mobile.dev, Windows는 zip을 풀고 bin 폴더를 PATH에 추가)',
+    '폰: 설정 → 휴대전화 정보 → 빌드번호 7번 탭 → 개발자 옵션 → USB 디버깅 켜기',
+    'USB 연결 후 폰에 뜨는 "USB 디버깅 허용" 승인, 테스트 중 화면 자동 꺼짐 끄기',
+    'data/config.json의 android.appId에 앱 패키지명 입력. APK 경로(android.apkPath)를 넣으면 실행 전에 자동 설치',
+    '요소 맵의 안드로이드 id 칸에 resource-id 입력. 비어 있는 요소를 쓰는 TC는 Blocked 처리',
+  ],
   ios: ['아이폰 실행은 Mac(Xcode)이 필요합니다', 'Mac에 에이전트를 띄우고 data/config.json의 ios.agentUrl에 주소 입력', 'Mac이 없으면 클라우드 디바이스 팜 연동을 검토'],
 };
 

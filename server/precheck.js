@@ -1,17 +1,11 @@
 // 실행 전 환경 점검. 하나라도 실패하면 해당 플랫폼 TC는 실행하지 않고 Blocked로 남긴다.
 const fs = require('fs');
-const { execFile } = require('child_process');
+const path = require('path');
 const { chromium, firefox, webkit, devices } = require('@playwright/test');
+const P = require('./paths');
+const android = require('./android');
 
 const BROWSERS = { chromium, firefox, webkit };
-
-function exec(cmd, args, timeout = 8000) {
-  return new Promise((resolve) => {
-    execFile(cmd, args, { timeout, windowsHide: true }, (err, stdout, stderr) => {
-      resolve({ ok: !err, code: err && err.code, stdout: String(stdout || ''), stderr: String(stderr || '') });
-    });
-  });
-}
 
 async function checkUrl(url) {
   try {
@@ -56,39 +50,44 @@ async function checkMw(config) {
   return { platform: 'mw', items };
 }
 
-async function checkAndroid(config) {
+// 통과하면 device(실행에 쓸 기기 정보)를 함께 돌려준다. tools는 테스트에서 가짜 adb/maestro를 넣을 때 쓴다
+async function checkAndroid(config, tools) {
+  const conf = config.android || {};
   const items = [];
-  const adb = await exec('adb', ['devices', '-l']);
-  if (!adb.ok && adb.code === 'ENOENT') {
+  const { adb, devices: found } = await android.listDevices(tools);
+  if (!adb) {
     items.push({ label: 'ADB', ok: false, detail: 'adb가 설치되어 있지 않거나 PATH에 없습니다 (Android SDK Platform-Tools)' });
-    return { platform: 'android', items, devices: [] };
+    return { platform: 'android', items, device: null };
   }
-  const found = adb.stdout.split(/\r?\n/).slice(1).map((l) => l.trim()).filter(Boolean).map((l) => {
-    const [serial, state] = l.split(/\s+/);
-    return { serial, state, model: (l.match(/model:(\S+)/) || [])[1] || serial };
-  });
-  const ready = found.filter((d) => d.state === 'device');
   items.push({ label: 'ADB', ok: true, detail: '설치됨' });
-  if (!ready.length) {
-    const unauthorized = found.some((d) => d.state === 'unauthorized');
-    items.push({ label: '기기 연결', ok: false, detail: unauthorized ? '기기에서 USB 디버깅 허용을 눌러주세요' : '연결된 기기가 없습니다. USB 디버깅을 켜고 연결하세요' });
+  const ready = found.filter((d) => d.state === 'device');
+  const d = conf.serial ? ready.find((x) => x.serial === conf.serial) : ready[0];
+  let device = null;
+  if (!d) {
+    const unauthorized = found.some((x) => x.state === 'unauthorized');
+    items.push({
+      label: '기기 연결', ok: false,
+      detail: conf.serial && ready.length ? `설정한 기기(${conf.serial})가 연결되어 있지 않습니다. 연결된 기기: ${ready.map((x) => x.serial).join(', ')}`
+        : unauthorized ? '기기 화면에서 "USB 디버깅 허용"을 눌러주세요'
+          : '연결된 기기가 없습니다. USB 디버깅을 켜고 연결하세요',
+    });
   } else {
-    const d = ready[0];
-    const [ver, power, pkg] = await Promise.all([
-      exec('adb', ['-s', d.serial, 'shell', 'getprop', 'ro.build.version.release']),
-      exec('adb', ['-s', d.serial, 'shell', 'dumpsys', 'power']),
-      exec('adb', ['-s', d.serial, 'shell', 'pm', 'list', 'packages', config.android.appId]),
-    ]);
-    items.push({ label: '기기 연결', ok: true, detail: `${d.model} · Android ${ver.stdout.trim()}` });
-    const awake = /mWakefulness=Awake/.test(power.stdout);
-    items.push({ label: '화면 켜짐', ok: awake, detail: awake ? '켜짐' : '화면이 꺼져 있습니다. 화면을 켜고 잠금을 해제하세요' });
-    const installed = pkg.stdout.includes(`package:${config.android.appId}`);
-    items.push({ label: '앱 설치', ok: installed, detail: installed ? config.android.appId : `${config.android.appId} 앱이 설치되어 있지 않습니다` });
+    const info = await android.deviceInfo(d.serial, conf.appId, tools);
+    device = { ...d, ...info };
+    items.push({ label: '기기 연결', ok: true, detail: `${d.model} · Android ${info.androidVersion}${ready.length > 1 && !conf.serial ? ` (${ready.length}대 중 첫 번째, android.serial로 지정 가능)` : ''}` });
+    items.push({ label: '화면 상태', ok: info.awake && !info.locked, detail: !info.awake ? '화면이 꺼져 있습니다. 화면을 켜세요' : info.locked ? '잠금 화면입니다. 잠금을 해제하세요' : '켜짐 · 잠금 해제' });
+    const apk = conf.apkPath ? path.resolve(P.ROOT, conf.apkPath) : null;
+    if (info.appInstalled) {
+      items.push({ label: '앱', ok: true, detail: `${conf.appId} ${info.appVersion || ''}${info.appVersionCode ? ` (${info.appVersionCode})` : ''}${apk ? ' · 실행 전 APK로 재설치' : ''}` });
+    } else if (apk && fs.existsSync(apk)) {
+      items.push({ label: '앱', ok: true, detail: `설치되어 있지 않음 · 실행 전 ${conf.apkPath} 설치` });
+    } else {
+      items.push({ label: '앱', ok: false, detail: `${conf.appId} 앱이 설치되어 있지 않습니다${apk ? ` (APK 없음: ${conf.apkPath})` : '. 앱을 설치하거나 android.apkPath를 지정하세요'}` });
+    }
   }
-  const maestro = await exec(process.platform === 'win32' ? 'maestro.bat' : 'maestro', ['--version']);
-  items.push({ label: 'Maestro', ok: maestro.ok, detail: maestro.ok ? maestro.stdout.trim() : '설치되어 있지 않습니다 (maestro.mobile.dev)' });
-  items.push({ label: '실행 어댑터', ok: false, detail: '안드로이드 실행은 다음 단계에서 지원합니다. 지금은 Maestro YAML 생성만 됩니다' });
-  return { platform: 'android', items, devices: ready };
+  const mv = await android.maestroVersion(tools);
+  items.push({ label: 'Maestro', ok: !!mv, detail: mv ? `버전 ${mv}` : '설치되어 있지 않거나 실행되지 않습니다 (Java 17 이상 필요)' });
+  return { platform: 'android', items, device };
 }
 
 async function checkIos(config) {
@@ -106,8 +105,8 @@ async function checkIos(config) {
 
 const CHECKS = { pc: checkPc, mw: checkMw, android: checkAndroid, ios: checkIos };
 
-async function precheck(config, platforms = Object.keys(CHECKS)) {
-  const results = await Promise.all(platforms.map((p) => CHECKS[p](config)));
+async function precheck(config, platforms = Object.keys(CHECKS), tools) {
+  const results = await Promise.all(platforms.map((p) => CHECKS[p](config, tools)));
   return results.map((r) => ({ ...r, ok: r.items.every((i) => i.ok), checkedAt: new Date().toISOString() }));
 }
 

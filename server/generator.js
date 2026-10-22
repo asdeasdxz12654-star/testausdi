@@ -79,57 +79,121 @@ function mobileSelector(name, platform, elements) {
   return null;
 }
 
-function genMaestro(tc, platform, ctx) {
+// TC → Maestro 명령 목록. 명령마다 몇 번 스텝에서 나왔는지(no)와 종류(kind)를 기록해
+// 실행 결과의 명령별 상태를 스텝으로 되돌려 매핑한다.
+// kind: action(조작) / presence(요소 노출 확인) / value(값 확인) / meta(스텝과 무관)
+// strict: 실행용. 식별자 없는 요소나 지원하지 않는 액션이 있으면 오류를 던진다
+function buildMaestro(tc, platform, ctx, { strict = false } = {}) {
   const steps = expandSteps(tc, ctx.flows);
-  const app = (ctx.config[platform] || {}).appId || 'com.example.app';
-  const out = [
-    `# 자동 생성 파일입니다. 원본: data/tcs/${tc.id}.json`,
-    `# ${tc.id} ${tc.title}`,
-    `appId: ${app}`,
-    '---',
-  ];
-  let launched = false;
+  const entries = [];
   const missing = new Set();
+  const cmd = (no, kind, yaml) => entries.push({ type: 'cmd', no, kind, yaml });
+  const note = (text) => entries.push({ type: 'note', text });
+  const needSel = (s) => {
+    const sel = mobileSelector(s.target, platform, ctx.elements);
+    if (!sel) {
+      missing.add(s.target);
+      if (strict) throw new HttpError(400, `${s.no}번 스텝: ${s.target} 요소에 ${PLATFORM(platform)} 식별자가 없습니다 (요소 맵에서 부여)`);
+    }
+    return sel;
+  };
+  let launched = false;
   for (const s of steps) {
     const def = ACTIONS[s.action];
     if (def.support[platform] === 'unsupported') {
-      out.push(`# ${s.no}. ${s.action}: ${PLATFORM(platform)}에서 지원하지 않는 액션 (이 TC는 Skipped 처리)`);
+      if (strict) throw new HttpError(400, `${PLATFORM(platform)}에서 지원하지 않는 액션: ${s.action}`);
+      note(`${s.no}. ${s.action}: ${PLATFORM(platform)}에서 지원하지 않는 액션 (이 TC는 Skipped 처리)`);
       continue;
     }
-    const sel = s.target && def.target === 'element' ? mobileSelector(s.target, platform, ctx.elements) : null;
-    if (def.target === 'element' && !sel) missing.add(s.target);
     const val = s.value !== undefined ? resolveValue(s.value, ctx.testData) : undefined;
-    out.push(`# ${s.no}. ${s.action}${s.target ? ` ${s.target}` : ''}`);
+    note(`${s.no}. ${s.action}${s.target ? ` ${s.target}` : ''}`);
     switch (s.action) {
-      case 'open':
-        if (!launched) { out.push('- launchApp:', '    clearState: true'); launched = true; }
-        else out.push(`# 앱 안에서 ${s.target} 화면으로 이동하는 방법(딥링크 등)을 지정해야 합니다`);
+      case 'open': {
+        const screen = ctx.elements.screens[s.target] || {};
+        const link = screen[platform];
+        if (!launched) {
+          cmd(s.no, 'action', '- launchApp:\n    clearState: true');
+          launched = true;
+          if (link) cmd(s.no, 'action', `- openLink: ${q(link)}`);
+        } else if (link) {
+          cmd(s.no, 'action', `- openLink: ${q(link)}`);
+        } else {
+          if (strict) throw new HttpError(400, `${s.no}번 스텝: 앱 안에서 ${s.target} 화면으로 이동하려면 요소 맵 화면에 ${PLATFORM(platform)} 딥링크가 필요합니다`);
+          note(`TODO 앱 안에서 ${s.target} 화면으로 이동하는 딥링크를 화면 정보에 지정하세요`);
+        }
         break;
-      case 'input':
-        out.push(sel ? `- tapOn:\n    ${sel}` : `# TODO ${s.target} 식별자 미부여`, `- inputText: ${q(val)}`);
+      }
+      case 'input': {
+        const sel = needSel(s);
+        if (sel) cmd(s.no, 'action', `- tapOn:\n    ${sel}`);
+        else note(`TODO ${s.target} 식별자 미부여`);
+        cmd(s.no, 'action', '- eraseText');
+        cmd(s.no, 'action', `- inputText: ${q(val)}`);
         break;
-      case 'tap':
-        out.push(sel ? `- tapOn:\n    ${sel}` : `# TODO ${s.target} 식별자 미부여`);
+      }
+      case 'tap': {
+        const sel = needSel(s);
+        if (sel) cmd(s.no, 'action', `- tapOn:\n    ${sel}`);
+        else note(`TODO ${s.target} 식별자 미부여`);
         break;
-      case 'hideKeyboard': out.push('- hideKeyboard'); break;
-      case 'back': out.push(platform === 'android' ? '- back' : '- swipe:\n    start: 0%, 50%\n    end: 80%, 50%'); break;
-      case 'assertText':
-        out.push(sel ? `- assertVisible:\n    ${sel}\n    text: ${q(val)}` : `- assertVisible: ${q(val)}   # ${s.target} 식별자 미부여로 문구로 대체`);
+      }
+      case 'hideKeyboard': cmd(s.no, 'action', '- hideKeyboard'); break;
+      case 'back': cmd(s.no, 'action', platform === 'android' ? '- back' : '- swipe:\n    start: 2%, 50%\n    end: 80%, 50%'); break;
+      case 'assertText': {
+        // 식별자가 있으면 "요소가 있는가"와 "문구가 맞는가"를 나눠 실패 원인을 구분한다
+        const sel = mobileSelector(s.target, platform, ctx.elements);
+        if (sel) {
+          cmd(s.no, 'presence', `- assertVisible:\n    ${sel}`);
+          cmd(s.no, 'value', `- assertVisible:\n    ${sel}\n    text: ${q(val)}`);
+        } else {
+          missing.add(s.target);
+          note(`${s.target} 식별자 미부여로 문구로 대체`);
+          cmd(s.no, 'value', `- assertVisible: ${q(val)}`);
+        }
         break;
-      case 'assertVisible':
-        out.push(sel ? `- assertVisible:\n    ${sel}` : `# TODO ${s.target} 식별자 미부여`);
+      }
+      case 'assertVisible': {
+        const sel = needSel(s);
+        if (sel) cmd(s.no, 'presence', `- assertVisible:\n    ${sel}`);
+        else note(`TODO ${s.target} 식별자 미부여`);
         break;
-      case 'assertHidden':
-        out.push(sel ? `- assertNotVisible:\n    ${sel}` : `# TODO ${s.target} 식별자 미부여`);
+      }
+      case 'assertHidden': {
+        const sel = needSel(s);
+        if (sel) cmd(s.no, 'presence', `- assertNotVisible:\n    ${sel}`);
+        else note(`TODO ${s.target} 식별자 미부여`);
         break;
+      }
       default:
-        out.push(`# ${s.action}: 변환 규칙 없음`);
+        if (strict) throw new HttpError(400, `${s.no}번 스텝: ${s.action} 액션의 Maestro 변환 규칙이 없습니다`);
+        note(`${s.action}: 변환 규칙 없음`);
     }
   }
-  if (missing.size) {
-    out.splice(4, 0, `# 식별자 미부여 요소 ${missing.size}개: ${[...missing].join(', ')}`, '# 개발팀에 resource-id / accessibilityIdentifier 부여를 요청하세요');
+  if (strict) cmd(null, 'meta', '- takeScreenshot: final');
+  return { appId: (ctx.config[platform] || {}).appId || 'com.example.app', steps, entries, missing: [...missing] };
+}
+
+function renderMaestro(tc, built) {
+  const out = [
+    `# 자동 생성 파일입니다. 원본: data/tcs/${tc.id}.json`,
+    `# ${tc.id} ${tc.title}`,
+  ];
+  if (built.missing.length) {
+    out.push(`# 식별자 미부여 요소 ${built.missing.length}개: ${built.missing.join(', ')}`, '# 개발팀에 resource-id / accessibilityIdentifier 부여를 요청하세요');
   }
+  out.push(`appId: ${built.appId}`, '---');
+  for (const e of built.entries) out.push(e.type === 'note' ? `# ${e.text}` : e.yaml);
   return out.join('\n') + '\n';
+}
+
+function genMaestro(tc, platform, ctx, opts) {
+  return renderMaestro(tc, buildMaestro(tc, platform, ctx, opts));
+}
+
+// 실행용: YAML과 명령 목록(스텝 매핑용)을 함께 돌려준다
+function maestroForRun(tc, platform, ctx) {
+  const built = buildMaestro(tc, platform, ctx, { strict: true });
+  return { code: renderMaestro(tc, built), commands: built.entries.filter((e) => e.type === 'cmd'), steps: built.steps, appId: built.appId };
 }
 
 function generate(tc, platform, ctx) {
@@ -137,4 +201,4 @@ function generate(tc, platform, ctx) {
   return { language: 'yaml', code: genMaestro(tc, platform, ctx) };
 }
 
-module.exports = { generate, genPlaywright, genMaestro, webLocator };
+module.exports = { generate, genPlaywright, genMaestro, maestroForRun, webLocator };

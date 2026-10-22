@@ -39,7 +39,7 @@ function classify(result, others) {
   if (result.status === 'Flaky') return 'flaky';
   if (result.status !== 'Fail') return null;
   const type = result.errorType;
-  if (type === 'NETWORK' || type === 'TIMEOUT') return 'env';
+  if (['NETWORK', 'TIMEOUT', 'DEVICE', 'APP_LAUNCH'].includes(type)) return 'env';
   if (type === 'CRASH') return 'product';
   if (type === 'ASSERTION_MISMATCH') return 'product';
   if (type === 'MULTIPLE_MATCH') return 'script';
