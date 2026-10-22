@@ -28,6 +28,8 @@ async function getJson(fetchImpl, url, token) {
   return res.json();
 }
 
+const relBox = (b, fb) => [(b.x - fb.x) / fb.width, (b.y - fb.y) / fb.height, b.width / fb.width, b.height / fb.height].map((v) => Math.round(v * 1000) / 1000);
+
 // 프레임 안의 TEXT 노드를 모아 프레임 기준 0~1 좌표로 바꾼다
 function collectTexts(frame) {
   const fb = frame.absoluteBoundingBox;
@@ -35,17 +37,41 @@ function collectTexts(frame) {
   const walk = (n) => {
     if (n.visible === false) return;
     if (n.type === 'TEXT' && n.characters && n.absoluteBoundingBox && fb) {
-      const b = n.absoluteBoundingBox;
-      out.push({
-        text: n.characters.trim(),
-        layer: n.name,
-        box: [(b.x - fb.x) / fb.width, (b.y - fb.y) / fb.height, b.width / fb.width, b.height / fb.height].map((v) => Math.round(v * 1000) / 1000),
-      });
+      out.push({ text: n.characters.trim(), layer: n.name, box: relBox(n.absoluteBoundingBox, fb) });
     }
     (n.children || []).forEach(walk);
   };
   walk(frame);
   return out.filter((t) => t.text);
+}
+
+// 레이어 이름으로 버튼·입력창·링크·탭을 찾는다 (규칙 기반 매핑의 요소 목록, AI 없이 TC 없는 영역 계산)
+const KINDS = [
+  ['input', /input|text\s*field|textfield|search\s*bar|입력|검색창/i],
+  ['button', /button|btn|cta|버튼/i],
+  ['tab', /\btab\b|tabbar|탭/i],
+  ['link', /\blink\b|링크/i],
+];
+const kindOf = (name) => (KINDS.find(([, re]) => re.test(name)) || [null])[0];
+
+function collectNodes(frame) {
+  const fb = frame.absoluteBoundingBox;
+  const out = [];
+  const textIn = (n) => (n.type === 'TEXT' ? [n.characters || ''] : (n.children || []).flatMap(textIn));
+  const walk = (n, top) => {
+    if (n.visible === false) return;
+    const kind = !top && ['INSTANCE', 'COMPONENT', 'FRAME', 'GROUP'].includes(n.type) ? kindOf(n.name || '') : null;
+    if (kind && n.absoluteBoundingBox && fb) {
+      const box = relBox(n.absoluteBoundingBox, fb);
+      if (box[2] * box[3] < 0.5) {
+        out.push({ name: n.name, kind, text: textIn(n).join(' ').trim(), box });
+        return; // 버튼 안의 아이콘·글자를 따로 세지 않는다
+      }
+    }
+    (n.children || []).forEach((c) => walk(c, false));
+  };
+  walk(frame, true);
+  return out;
 }
 
 // 링크에 node-id가 있으면 그 노드(프레임이면 그 자체, 섹션·페이지면 안의 프레임들), 없으면 첫 페이지의 최상위 프레임들
@@ -87,9 +113,10 @@ async function fetchFrames(url, token, { fetchImpl = fetch, maxFrames = 30 } = {
       height: Math.round(f.absoluteBoundingBox ? f.absoluteBoundingBox.height : 0),
       png: Buffer.from(await res.arrayBuffer()),
       texts: collectTexts(f),
+      nodes: collectNodes(f),
     });
   }
   return { fileKey: ref.fileKey, frames: out, skipped };
 }
 
-module.exports = { parseFigmaUrl, collectTexts, fetchFrames };
+module.exports = { parseFigmaUrl, collectTexts, collectNodes, fetchFrames };

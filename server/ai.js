@@ -33,7 +33,14 @@ function publicSettings() {
 function saveSettings(patch) {
   const cur = store.readJson(SETTINGS_FILE(), {});
   const next = { ...cur };
-  if (patch.apiKey !== undefined) next.apiKey = String(patch.apiKey).trim();
+  if (patch.apiKey !== undefined) {
+    const k = String(patch.apiKey).trim();
+    // 접두어 뒤 형식은 키 종류마다 달라 sk-ant- 까지만 본다. 실제 동작 여부는 "키 확인"(checkKey)으로 판단
+    if (k && (!k.startsWith('sk-ant-') || /\s/.test(k))) {
+      throw new AiError('Claude API 키 형식이 아닙니다. platform.claude.com → API Keys에서 만든 sk-ant-로 시작하는 키를 붙여넣으세요 (Claude.ai 구독은 API 키가 아닙니다)', 400);
+    }
+    next.apiKey = k;
+  }
   if (patch.figmaToken !== undefined) next.figmaToken = String(patch.figmaToken).trim();
   if (patch.consent !== undefined) next.consent = !!patch.consent;
   store.writeJson(SETTINGS_FILE(), next);
@@ -92,6 +99,21 @@ async function callJson(client, { model, effort, system, content, schema, maxTok
   return { data, usage: msg.usage || {}, model: msg.model };
 }
 
+// 키가 실제로 동작하는지 확인. 모델 정보 조회라 토큰을 쓰지 않는다
+async function checkKey(client, model) {
+  try {
+    const m = await client.models.retrieve(model);
+    return { ok: true, model: m.id, message: `키 정상 · ${m.display_name || m.id} 사용 가능` };
+  } catch (e) {
+    if (e instanceof Anthropic.AuthenticationError) return { ok: false, message: '인증 실패: 키가 올바르지 않거나 삭제된 키입니다' };
+    if (e instanceof Anthropic.PermissionDeniedError) return { ok: false, message: `이 키로는 사용할 수 없습니다: ${e.message}` };
+    if (e instanceof Anthropic.NotFoundError) return { ok: false, message: `이 키로는 ${model} 모델을 쓸 수 없습니다` };
+    if (e instanceof Anthropic.APIConnectionError) return { ok: false, message: `Claude API에 연결하지 못했습니다: ${e.message}` };
+    if (e instanceof Anthropic.APIError) return { ok: false, message: `Claude API 오류 (${e.status}): ${e.message}` };
+    throw e;
+  }
+}
+
 function addUsage(total, usage) {
   const t = total || { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, calls: 0 };
   t.input += usage.input_tokens || 0;
@@ -107,4 +129,4 @@ function costUsd(t) {
   return (t.input * PRICE.input + t.output * PRICE.output + t.cacheWrite * PRICE.cacheWrite + t.cacheRead * PRICE.cacheRead) / 1e6;
 }
 
-module.exports = { getSettings, publicSettings, saveSettings, makeClient, callJson, addUsage, costUsd, AiError, PRICE };
+module.exports = { getSettings, publicSettings, saveSettings, makeClient, callJson, checkKey, addUsage, costUsd, AiError, PRICE };

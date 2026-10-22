@@ -115,7 +115,7 @@ async function addFigma(id, url, deps = {}) {
     const fid = nextId(p.frames, 'F');
     const file = `frames/${fid}.png`;
     fs.writeFileSync(path.join(projDir(id), file), f.png);
-    p.frames.push({ id: fid, name: f.name, file, source: 'figma', figmaId: f.figmaId, width: f.width, height: f.height, texts: f.texts });
+    p.frames.push({ id: fid, name: f.name, file, source: 'figma', figmaId: f.figmaId, width: f.width, height: f.height, texts: f.texts, nodes: f.nodes || [] });
   }
   p.figma = { url: String(url).trim(), fileKey: got.fileKey };
   saveProject(p);
@@ -159,7 +159,7 @@ const SYSTEM = [
   '- frame과 doc에는 자료에 붙은 id(F1, S1 ...)만 씁니다.',
   '- box는 해당 프레임 이미지 기준 [x, y, 너비, 높이]이며 각 값은 0~1 비율입니다. 요소를 찾지 못했으면 빈 배열입니다.',
   '- candidates는 그 문장이 가리킬 수 있는 요소가 화면에 몇 개인지입니다. 하나로 정해지면 1, 문구가 모호해 여러 개면 그 개수, 찾지 못하면 0입니다.',
-  '- designTextMatch는 문장에 나온 문구(따옴표 안 내용, 버튼 이름 등)가 디자인 화면의 글자와 같을 때만 true입니다.',
+  '- designTextMatch는 기대결과 문장의 문구(따옴표 안 내용)가 디자인 화면의 글자와 같을 때만 true입니다. 절차 문장의 따옴표는 입력값이므로 비교하지 않고, 대상 요소가 화면에 보이면 true로 둡니다.',
   '- evidence.quote는 기획서 문장을 글자 그대로 옮깁니다. 요약하거나 고쳐 쓰지 않습니다. policyId는 기획서에 정책 번호가 있을 때만 씁니다. page는 PDF 쪽 번호, 없으면 -1입니다.',
   '- TC가 필요로 하는 화면 상태(에러, 로딩, 빈 화면, 팝업 등)가 디자인에 없으면 missingInDesign에 적습니다.',
   '- TC의 동작이 기획서 어디에도 근거가 없으면 specGap을 true로 둡니다.',
@@ -267,7 +267,7 @@ function verifyResult(raw, { p, lines, elements }) {
     // 피그마 텍스트 레이어가 있으면 따옴표 안 문구가 디자인에 실제로 있는지 직접 확인한다
     const quotedVal = (l.text.match(/"([^"]+)"/) || [])[1];
     const fr = p.frames.find((f) => f.id === out.frame);
-    if (quotedVal && fr && fr.texts && !/테스트 데이터/.test(quotedVal)) {
+    if (l.kind === 'expected' && quotedVal && fr && fr.texts && !/테스트 데이터/.test(quotedVal)) {
       out.designTextMatch = fr.texts.some((t) => normText(t.text).includes(normText(quotedVal)));
       out.textCheck = 'figma';
     }
@@ -295,7 +295,8 @@ function confidence(r) {
   const targets = r.steps.filter((s) => s.needsElement !== false);
   const located = targets.filter((s) => s.box);
   const maxCand = Math.max(0, ...r.steps.map((s) => s.candidates));
-  const mismatch = r.steps.filter((s) => s.designTextMatch === false && /"/.test(s.text));
+  // 문구 비교는 기대결과 문장만. 절차 문장의 따옴표는 입력값이라 화면에 없는 게 정상이다
+  const mismatch = r.steps.filter((s) => s.kind === 'expected' && s.designTextMatch === false && /"/.test(s.text));
   const hasEvidence = r.evidence.length > 0;
   if (!r.frame && !hasEvidence) return { level: 'none', reasons: ['디자인 화면과 기획서 근거를 모두 찾지 못했습니다 (기획 누락 의심)'] };
   if (maxCand >= 3) reasons.push(`후보가 ${maxCand}개인 문장이 있습니다`);
@@ -311,7 +312,261 @@ function confidence(r) {
   return { level: 'high', reasons: [`요소 후보 1개, 디자인과 기획서 근거 모두 있음${unverified ? ' (PDF·이미지 근거는 원문 대조 불가)' : ''}`] };
 }
 
-// ---- 분석 실행 ----
+// method: rules(규칙, 무료) / claude-code(구독) / api(유료)
+function storeResult(p, tc, v, method) {
+  const prev = p.results[tc.id];
+  p.results[tc.id] = {
+    tcId: tc.id, title: tc.title, ...v, method, confidence: confidence(v), analyzedAt: new Date().toISOString(),
+    review: { status: 'pending', note: prev && prev.review ? prev.review.note : '' },
+  };
+}
+
+function pickTcs(p, { tcIds, onlyNew } = {}) {
+  const ids = (tcIds && tcIds.length ? tcIds : p.tcIds).filter((t) => !onlyNew || !p.results[t]);
+  const tcs = store.listTcs().filter((t) => ids.includes(t.id));
+  if (!tcs.length) throw new HttpError(400, '분석할 TC를 고르세요');
+  return tcs;
+}
+
+// ---- 규칙 기반 분석 (AI 없음, 무료) ----
+// 피그마 텍스트 레이어·버튼 레이어와 텍스트 기획서만으로 찾는다. 캡처 이미지만 있는 화면은 위치를 찾을 수 없다
+const STRIP = /(입력\s*창|입력\s*란|입력\s*필드|입력\s*칸|필드|버튼|문구|텍스트|영역|아이콘|링크|탭|메뉴|칸)$/;
+const STOP = new Set(['화면', '진입', '입력', '클릭', '노출', '확인', '선택', '버튼', '문구', '테스트', '데이터', '미노출', '표시', '이동', '경우', '상태', '시']);
+const quotedIn = (t) => [...String(t).matchAll(/"([^"]+)"/g)].map((m) => m[1]).filter((q) => !/^테스트 데이터/.test(q));
+const center = (b) => [b[0] + b[2] / 2, b[1] + b[3] / 2];
+const inside = (pt, b) => pt[0] >= b[0] && pt[0] <= b[0] + b[2] && pt[1] >= b[1] && pt[1] <= b[1] + b[3];
+
+// 한 문장이 한 프레임에서 가리키는 레이어 후보
+function ruleHits(f, line, elements) {
+  const texts = f.texts || [];
+  const nodes = f.nodes || [];
+  const values = quotedIn(line.text);
+  const names = [];
+  const el = line.target && elements.elements[line.target];
+  if (el) {
+    names.push(el.label);
+    const short = el.label.replace(STRIP, '').trim();
+    if (short.length >= 2) names.push(short);
+  }
+  const hits = [];
+  // 1) 따옴표 안 문구: 그 문구를 담은 텍스트 레이어
+  for (const v of values) texts.filter((t) => normText(t.text).includes(normText(v))).forEach((t) => hits.push({ name: t.text, box: t.box, via: 'value' }));
+  // 2) 요소 이름: 이름이 같은 버튼·입력창 레이어, 또는 글자가 같은 텍스트 레이어
+  if (!hits.length) {
+    for (const n of names) {
+      nodes.filter((x) => normText(x.name) === normText(n) || (x.text && normText(x.text) === normText(n))).forEach((x) => hits.push({ name: x.text || x.name, box: x.box, via: 'node' }));
+      if (!hits.length) texts.filter((t) => normText(t.text) === normText(n)).forEach((t) => hits.push({ name: t.text, box: t.box, via: 'text' }));
+      if (hits.length) break;
+    }
+  }
+  // 3) 원문만 있는 TC: 문장 안에 들어 있는 레이어 글자 (가장 긴 것)
+  if (!hits.length && !el) {
+    const inLine = texts.filter((t) => normText(t.text).length >= 2 && normText(line.text).includes(normText(t.text)));
+    const longest = Math.max(0, ...inLine.map((t) => normText(t.text).length));
+    inLine.filter((t) => normText(t.text).length === longest).forEach((t) => hits.push({ name: t.text, box: t.box, via: 'text' }));
+  }
+  // 글자 레이어가 버튼·입력창 레이어 안에 있으면 그 레이어 영역을 쓴다 (TC 없는 영역 계산이 맞도록)
+  return hits.map((h) => {
+    const host = h.via !== 'node' && nodes.find((n) => inside(center(h.box), n.box));
+    return host ? { ...h, box: host.box, name: host.text || host.name } : h;
+  });
+}
+
+// 기획서 문장 점수: TC의 따옴표 문구가 그대로 있으면 3점, 요소 이름·제목 낱말이 있으면 1점씩. 2점 이상인 문장 중 상위 2개
+function ruleEvidence(p, tc, lines, elements) {
+  const values = new Set(lines.flatMap((l) => quotedIn(l.text)));
+  const words = new Set();
+  lines.forEach((l) => {
+    const el = l.target && elements.elements[l.target];
+    if (el) words.add(el.label.replace(STRIP, '').trim());
+  });
+  String(tc.title).split(/[\s,·/()]+/)
+    .map((w) => w.replace(/(을|를|이|가|은|는|에|의|시)$/, ''))
+    .filter((w) => /[가-힣A-Za-z]{2,}/.test(w) && !STOP.has(w))
+    .forEach((w) => words.add(w));
+  const out = [];
+  for (const s of p.specs.filter((x) => x.kind === 'text')) {
+    const sentences = s.text.split(/\r?\n|(?<=[.!?。])\s+/).map((x) => x.trim()).filter((x) => x.length >= 4);
+    const scored = sentences.map((line) => {
+      const n = normText(line);
+      let score = 0;
+      values.forEach((v) => { if (n.includes(normText(v))) score += 3; });
+      words.forEach((w) => { if (w.length >= 2 && n.includes(normText(w))) score += 1; });
+      return { line, score };
+    }).filter((x) => x.score >= 2).sort((a, b) => b.score - a.score).slice(0, 2);
+    scored.forEach((x) => out.push({ doc: s.id, specName: s.name, policyId: (x.line.match(/\b[A-Z]{2,6}-\d{1,4}\b/) || [''])[0], quote: x.line, page: -1, verified: true }));
+  }
+  return out;
+}
+
+function ruleMapTc(p, tc, lines, elements) {
+  const frames = p.frames.filter((f) => (f.texts && f.texts.length) || (f.nodes && f.nodes.length));
+  const perFrame = frames.map((f) => ({ f, hits: lines.map((l) => ruleHits(f, l, elements)) }));
+  const screenLabel = (lines.find((l) => l.target && elements.screens[l.target]) || {}).target;
+  const label = screenLabel ? normText(elements.screens[screenLabel].label) : '';
+  const score = (x) => x.hits.filter((h) => h.length).length + (label && normText(x.f.name).includes(label) ? 0.5 : 0);
+  const best = perFrame.slice().sort((a, b) => score(b) - score(a))[0];
+  const main = best && score(best) >= 1 ? best : null;
+  const warnings = [];
+  if (!frames.length) warnings.push('피그마 텍스트 레이어가 있는 화면이 없어 위치를 찾지 못했습니다. 규칙 기반 분석은 피그마에서 가져온 화면에서만 동작합니다');
+
+  const steps = lines.map((l, i) => {
+    const base = { lineNo: l.no, text: l.text, kind: l.kind, needsElement: l.needsElement !== false, frame: '', name: '', elementKey: l.target && elements.elements[l.target] ? l.target : '', suggestedKey: '', box: null, candidates: 0, designTextMatch: null, textCheck: 'figma', note: '' };
+    if (l.target && elements.screens[l.target]) {
+      // 화면 진입은 화면 전체가 대상. 주 화면을 못 찾았으면 화면 안 글자에 억지로 맞추지 않는다
+      return main ? { ...base, frame: main.f.id, name: elements.screens[l.target].label, box: [0, 0, 1, 1], candidates: 1, designTextMatch: true } : { ...base, note: '화면을 찾지 못했습니다' };
+    }
+    // 주 화면에서 먼저 찾고, 없으면 다른 화면에서 찾는다
+    const where = (main && main.hits[i].length ? main : perFrame.find((x) => x.hits[i].length)) || null;
+    const values = quotedIn(l.text);
+    if (!where) {
+      const expectedText = values.length && l.kind === 'expected';
+      return { ...base, designTextMatch: expectedText ? false : null, note: expectedText ? `"${values[0]}" 문구가 있는 화면을 찾지 못했습니다` : '이름이 같은 레이어를 찾지 못했습니다' };
+    }
+    const h = where.hits[i];
+    return { ...base, frame: where.f.id, name: h[0].name, box: h[0].box, candidates: h.length, designTextMatch: values.length && l.kind === 'expected' ? values.every((v) => (where.f.texts || []).some((t) => normText(t.text).includes(normText(v)))) : true };
+  });
+  const evidence = ruleEvidence(p, tc, lines, elements);
+  if (p.specs.some((s) => s.kind !== 'text')) warnings.push('PDF·이미지 기획서는 규칙 기반 분석에서 근거를 찾을 수 없습니다. 텍스트(.txt/.md)로 저장해 올리면 찾습니다');
+  const missingInDesign = [...new Set(steps.filter((s) => s.designTextMatch === false).flatMap((s) => quotedIn(s.text).map((q) => `"${q}" 문구가 있는 화면`)))];
+  return { frame: main ? main.f.id : '', steps, evidence, missingInDesign, specGap: !evidence.length, notes: '', warnings };
+}
+
+function analyzeRules(id, opts = {}) {
+  if (running && running.id === id) throw new HttpError(409, '분석 중입니다');
+  const p = getProject(id);
+  const tcs = pickTcs(p, opts);
+  const elements = store.getElements();
+  const flows = store.getFlows();
+  // 피그마 레이어로 요소 목록을 만들어 둔다 (AI 분석으로 이미 만든 목록은 그대로 둔다)
+  p.frames.forEach((f) => { if (!p.inventory[f.id] && f.nodes && f.nodes.length) p.inventory[f.id] = f.nodes.map((n, i) => ({ id: `${f.id}-n${i + 1}`, name: n.text || n.name, kind: n.kind, text: n.text, box: n.box })); });
+  const skipped = [];
+  for (const tc of tcs) {
+    const lines = tcLines(tc, elements, flows);
+    if (!lines.length) { skipped.push(`${tc.id}: 스텝과 원문이 없어 건너뜀`); continue; }
+    storeResult(p, tc, ruleMapTc(p, tc, lines, elements), 'rules');
+  }
+  p.lastRun = { at: new Date().toISOString(), model: 'rules', errors: skipped };
+  saveProject(p);
+  return view(id);
+}
+
+// ---- Claude Code 연계 (구독 안에서 처리) ----
+// 요청 파일을 만들고, Claude Code가 쓴 응답 파일을 API 답과 같은 규칙으로 검증해 가져온다
+const ccDir = (id) => path.join(projDir(id), 'claude-code');
+
+function exportForClaudeCode(id, opts = {}) {
+  const p = getProject(id);
+  if (!p.frames.length) throw new HttpError(400, '디자인 화면(캡처 또는 피그마)을 하나 이상 넣어 주세요');
+  const tcs = pickTcs(p, opts);
+  const elements = store.getElements();
+  const flows = store.getFlows();
+  const dir = ccDir(id);
+  fs.mkdirSync(dir, { recursive: true });
+  const abs = (f) => path.join(projDir(id), f);
+  const responseFile = path.join(dir, 'response.json');
+  const tcBlocks = tcs.map((tc) => {
+    const lines = tcLines(tc, elements, flows);
+    return lines.length ? tcPrompt(tc, lines) : null;
+  }).filter(Boolean);
+  const md = [
+    `# AutoTC 영역 매핑 요청 · ${p.name}`,
+    '',
+    '이 파일은 AutoTC가 만든 분석 요청입니다. 아래 자료를 직접 읽고, 맨 아래 형식대로 결과 파일을 써 주세요.',
+    '',
+    '## 분석 규칙',
+    SYSTEM,
+    '',
+    '## 화면 디자인 (이미지 파일을 열어서 보세요)',
+    ...p.frames.map((f) => `- ${f.id} "${f.name}": ${abs(f.file)}${f.texts && f.texts.length ? `\n  피그마 텍스트 레이어(문구와 [x,y,너비,높이] 비율): ${JSON.stringify(f.texts.map((t) => [t.text, t.box]))}` : ''}`),
+    '',
+    '## 기획서',
+    ...(p.specs.length ? p.specs.map((s) => `- ${s.id} "${s.name}": ${abs(s.file)}`) : ['- (없음)']),
+    '',
+    '## 요소 맵 (논리 이름: 표시 이름)',
+    ...Object.entries(elements.screens).map(([k, s]) => `- 화면 ${k}: ${s.label}`),
+    ...Object.entries(elements.elements).map(([k, e]) => `- ${k}: ${e.label}`),
+    '',
+    '## 분석할 TC',
+    ...tcBlocks.map((b) => `\n${b}`),
+    '',
+    '## 결과 파일',
+    `다음 경로에 JSON으로 저장하세요: ${responseFile}`,
+    '',
+    '```',
+    '{',
+    '  "inventory": { "<프레임 id>": [ { "name": "", "kind": "button|input|link|tab|text|image|other", "text": "", "box": [x, y, w, h] } ] },',
+    '  "results": { "<TC ID>": { "frame": "", "steps": [ { "lineNo": 1, "frame": "", "name": "", "elementKey": "", "suggestedKey": "", "box": [x, y, w, h], "candidates": 1, "designTextMatch": true, "note": "" } ], "evidence": [ { "doc": "S1", "policyId": "", "quote": "", "page": -1 } ], "missingInDesign": [], "specGap": false, "notes": "" } }',
+    '}',
+    '```',
+    '- inventory에는 각 프레임에 보이는 버튼·입력창·링크·탭·안내 문구를 빠짐없이 적습니다 (box는 그 프레임 기준 0~1 비율).',
+    '- results에는 위 TC를 하나도 빠짐없이 적고, steps는 TC의 문장마다 하나씩 lineNo 순서대로 적습니다.',
+    '- 확인할 수 없는 값은 지어내지 말고 "" 또는 -1, box는 []로 둡니다. 확신도는 AutoTC가 규칙으로 계산하므로 적지 않습니다.',
+  ].join('\n');
+  fs.writeFileSync(path.join(dir, 'request.md'), md, 'utf8');
+  if (fs.existsSync(responseFile)) fs.renameSync(responseFile, path.join(dir, `response-${Date.now()}.json.bak`));
+  p.claudeCode = { requestFile: path.join(dir, 'request.md'), responseFile, tcIds: tcs.map((t) => t.id), at: new Date().toISOString() };
+  saveProject(p);
+  return {
+    ...view(id),
+    prompt: `${p.claudeCode.requestFile} 파일을 읽고, 안의 지시대로 화면·기획서를 분석해서 ${responseFile} 에 결과를 저장해 줘.`,
+  };
+}
+
+const arr = (v) => (Array.isArray(v) ? v : []);
+const strOr = (v) => (typeof v === 'string' ? v : '');
+
+// 응답 파일의 모양을 API 스키마와 같게 맞춘다. 빠진 칸은 비우고, 형식이 틀린 칸은 버린다
+function normalizeRaw(r) {
+  return {
+    frame: strOr(r.frame),
+    steps: arr(r.steps).filter((s) => s && Number.isInteger(s.lineNo)).map((s) => ({
+      lineNo: s.lineNo, frame: strOr(s.frame), name: strOr(s.name), elementKey: strOr(s.elementKey), suggestedKey: strOr(s.suggestedKey),
+      box: arr(s.box), candidates: Number.isInteger(s.candidates) ? s.candidates : 0, designTextMatch: !!s.designTextMatch, note: strOr(s.note),
+    })),
+    evidence: arr(r.evidence).filter((e) => e && typeof e.quote === 'string').map((e) => ({ doc: strOr(e.doc), policyId: strOr(e.policyId), quote: e.quote, page: Number.isInteger(e.page) ? e.page : -1 })),
+    missingInDesign: arr(r.missingInDesign).filter((x) => typeof x === 'string'),
+    specGap: !!r.specGap,
+    notes: strOr(r.notes),
+  };
+}
+
+function importClaudeCode(id) {
+  if (running && running.id === id) throw new HttpError(409, '분석 중입니다');
+  const p = getProject(id);
+  if (!p.claudeCode) throw new HttpError(400, '먼저 "Claude Code로 분석"을 눌러 요청 파일을 만드세요');
+  if (!fs.existsSync(p.claudeCode.responseFile)) throw new HttpError(404, `응답 파일이 아직 없습니다: ${p.claudeCode.responseFile}`);
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(p.claudeCode.responseFile, 'utf8').replace(/^﻿/, ''));
+  } catch (e) {
+    throw new HttpError(400, `응답 파일의 JSON 형식이 올바르지 않습니다: ${e.message}`);
+  }
+  const elements = store.getElements();
+  const flows = store.getFlows();
+  const frameIds = new Set(p.frames.map((f) => f.id));
+  const errors = [];
+  for (const [fid, list] of Object.entries(data.inventory || {})) {
+    if (!frameIds.has(fid)) { errors.push(`없는 화면 id의 요소 목록을 버렸습니다: ${fid}`); continue; }
+    p.inventory[fid] = arr(list).filter((e) => e && validBox(e.box) && typeof e.name === 'string')
+      .map((e, i) => ({ id: `${fid}-c${i + 1}`, name: e.name, kind: INVENTORY_SCHEMA.properties.elements.items.properties.kind.enum.includes(e.kind) ? e.kind : 'other', text: strOr(e.text), box: e.box }));
+  }
+  let imported = 0;
+  for (const tcId of p.claudeCode.tcIds) {
+    const r = data.results && data.results[tcId];
+    if (!r) { errors.push(`${tcId}: 응답에 결과가 없습니다`); continue; }
+    let tc;
+    try { tc = store.getTc(tcId); } catch { errors.push(`${tcId}: TC가 삭제되었습니다`); continue; }
+    const lines = tcLines(tc, elements, flows);
+    storeResult(p, tc, verifyResult(normalizeRaw(r), { p, lines, elements }), 'claude-code');
+    imported += 1;
+  }
+  p.lastRun = { at: new Date().toISOString(), model: 'claude-code', errors };
+  saveProject(p);
+  return { ...view(id), imported };
+}
+
+// ---- 분석 실행 (Claude API) ----
 function estimate(p, tcCount) {
   const imageTokens = 1600;
   let shared = 400 + p.frames.length * (imageTokens + 150);
@@ -375,9 +630,7 @@ function startAnalysis(id, { tcIds, onlyNew } = {}, deps = {}) {
         const lines = tcLines(tc, elements, flows);
         if (!lines.length) { p.lastRun.errors.push(`${tc.id}: 스텝과 원문이 없어 건너뜀`); return; }
         const raw = await call(tcPrompt(tc, lines), MAPPING_SCHEMA);
-        const v = verifyResult(raw, { p, lines, elements });
-        const prev = p.results[tc.id];
-        p.results[tc.id] = { tcId: tc.id, title: tc.title, ...v, confidence: confidence(v), analyzedAt: new Date().toISOString(), review: { status: 'pending', note: prev && prev.review ? prev.review.note : '' } };
+        storeResult(p, tc, verifyResult(raw, { p, lines, elements }), 'api');
       }),
     ];
     const runTask = async (t) => {
@@ -519,6 +772,6 @@ function apply(id) {
 
 module.exports = {
   listProjects, getProject, createProject, deleteProject, updateProject, addFile, addFigma, removeFile,
-  startAnalysis, view, review, apply, estimate,
+  startAnalysis, analyzeRules, exportForClaudeCode, importClaudeCode, view, review, apply, estimate,
   tcLines, verifyResult, confidence, coverage, MAPPING_SCHEMA, INVENTORY_SCHEMA, SYSTEM, projDir,
 };

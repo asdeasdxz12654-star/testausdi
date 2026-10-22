@@ -74,6 +74,9 @@ label.field > input, label.field > select, label.field > textarea { color: var(-
 .form-grid { display: grid; grid-template-columns: 180px minmax(0, 1fr) 110px 120px; gap: 12px; }
 .form-grid .wide { grid-column: 1 / -1; }
 .s-none { color: var(--fail); background: transparent; border: 1px dashed var(--fail); }
+.modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1000px) { .modes { grid-template-columns: minmax(0, 1fr); } }
+.mode { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: grid; gap: 8px; align-content: start; }
 .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
 .thumbs figure { margin: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--sunken); min-width: 0; }
 .thumbs img { display: block; width: 100%; height: 140px; object-fit: cover; object-position: top; }

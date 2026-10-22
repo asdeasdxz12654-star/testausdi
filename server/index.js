@@ -15,6 +15,7 @@ const runner = require('./runner');
 const importer = require('./importer');
 const ai = require('./ai');
 const mapping = require('./mapping');
+const settings = require('./settings');
 const pkg = require('../package.json');
 
 const MIME = {
@@ -74,6 +75,9 @@ route('GET', '/api/meta', () => ({
 }));
 
 route('GET', '/api/config', () => store.getConfig());
+route('PUT', '/api/config', (_, body) => settings.save(body));
+route('GET', '/api/settings/devices', () => ({ devices: settings.deviceList(), models: settings.MODELS, efforts: settings.EFFORTS }));
+route('POST', '/api/settings/inspect', (_, body) => settings.inspectSite(body.url));
 
 route('GET', '/api/tcs', () => store.listTcs());
 route('GET', '/api/tcs/:id', ({ id }) => store.getTc(id));
@@ -231,6 +235,10 @@ route('GET', '/api/import/template', async () => ({
 // ---- TC 영역 매핑 ----
 route('GET', '/api/ai/settings', () => ai.publicSettings());
 route('PUT', '/api/ai/settings', (_, body) => ai.saveSettings(body));
+route('POST', '/api/ai/check', () => {
+  const config = store.getConfig();
+  return ai.checkKey(ai.makeClient(ai.getSettings().apiKey), (config.ai && config.ai.model) || 'claude-opus-5-5');
+});
 route('GET', '/api/mapping', () => mapping.listProjects());
 route('POST', '/api/mapping', (_, body) => mapping.createProject(body.name));
 route('GET', '/api/mapping/:id', ({ id }) => mapping.view(id));
@@ -243,6 +251,9 @@ route('POST', '/api/mapping/:id/figma', async ({ id }, body) => {
   return { ...mapping.view(id), added: r.added, skipped: r.skipped };
 });
 route('POST', '/api/mapping/:id/analyze', ({ id }, body) => { mapping.startAnalysis(id, body); return mapping.view(id); });
+route('POST', '/api/mapping/:id/analyze-rules', ({ id }, body) => mapping.analyzeRules(id, body));
+route('POST', '/api/mapping/:id/claude-code/export', ({ id }, body) => mapping.exportForClaudeCode(id, body));
+route('POST', '/api/mapping/:id/claude-code/import', ({ id }) => mapping.importClaudeCode(id));
 route('PUT', '/api/mapping/:id/results/:tcId', ({ id, tcId }, body) => mapping.review(id, tcId, body));
 route('POST', '/api/mapping/:id/apply', ({ id }) => mapping.apply(id));
 

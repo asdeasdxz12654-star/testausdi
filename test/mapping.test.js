@@ -158,6 +158,12 @@ test('confidence: 요소가 없는 스텝(키보드 닫기 등)은 영역을 못
   assert.strictEqual(mapping.confidence(r).level, 'high');
   r.steps.push(step(4, true, null));
   assert.deepStrictEqual(mapping.confidence(r), { level: 'mid', reasons: ['영역을 찾지 못한 문장 1개'] });
+  r.steps.pop();
+  // 절차 문장의 따옴표는 입력값이라 화면 문구와 달라도 감점하지 않고, 기대결과 문장만 비교한다
+  r.steps.push({ ...step(5, true, [0.1, 0.3, 0.2, 0.1]), kind: 'step', text: '비밀번호 입력창에 "wrong_pw" 입력', designTextMatch: false });
+  assert.strictEqual(mapping.confidence(r).level, 'high');
+  r.steps.push({ ...step(6, true, [0.1, 0.4, 0.2, 0.1]), kind: 'expected', text: '에러 문구에 "잠김" 노출', designTextMatch: false });
+  assert.strictEqual(mapping.confidence(r).level, 'low');
 });
 
 test('figma: 링크 해석과 프레임·텍스트 레이어 가져오기', async () => {
@@ -184,7 +190,99 @@ test('figma: 링크 해석과 프레임·텍스트 레이어 가져오기', asyn
   assert.strictEqual(calls[0][1], 'figd_token');
   assert.ok(!calls.find((c) => c[0].startsWith('https://cdn/') && c[1]), '이미지 CDN에는 토큰을 보내지 않는다');
   await assert.rejects(figma.fetchFrames('https://www.figma.com/design/AbC123/Shop', '', { fetchImpl: fakeFetch }), /토큰이 없습니다/);
+
+  // 이름으로 버튼·입력창을 찾고, 버튼 안의 글자는 버튼 이름으로 합치며, 화면 절반 이상 큰 레이어는 뺀다
+  const nodes = figma.collectNodes({ type: 'FRAME', name: 'Login', absoluteBoundingBox: { x: 0, y: 0, width: 400, height: 800 }, children: [
+    { type: 'INSTANCE', name: 'Button/Primary', absoluteBoundingBox: { x: 40, y: 480, width: 320, height: 64 }, children: [{ type: 'TEXT', characters: '로그인' }, { type: 'INSTANCE', name: 'Button/Icon', absoluteBoundingBox: { x: 50, y: 490, width: 20, height: 20 } }] },
+    { type: 'FRAME', name: '입력창 아이디', absoluteBoundingBox: { x: 40, y: 200, width: 320, height: 48 }, children: [{ type: 'TEXT', characters: '아이디' }] },
+    { type: 'FRAME', name: 'Button area', absoluteBoundingBox: { x: 0, y: 0, width: 400, height: 700 } },
+    { type: 'GROUP', name: 'hidden button', visible: false, absoluteBoundingBox: { x: 0, y: 0, width: 10, height: 10 } },
+  ] });
+  assert.deepStrictEqual(nodes.map((n) => [n.kind, n.text]), [['button', '로그인'], ['input', '아이디']]);
+  assert.deepStrictEqual(nodes[0].box, [0.1, 0.6, 0.8, 0.08]);
   await assert.rejects(figma.fetchFrames('https://www.figma.com/design/Nope/Shop?node-id=1-1', 't', { fetchImpl: async () => ({ ok: false, status: 403 }) }), /권한/);
+});
+
+// 피그마에서 가져온 것처럼 텍스트·버튼 레이어가 있는 화면
+const figmaFrame = {
+  name: '01_Login_error', png: PNG,
+  texts: [
+    { text: '로그인', layer: 'title', box: [0.1, 0.05, 0.3, 0.05] },
+    { text: '로그인', layer: 'label', box: [0.45, 0.62, 0.1, 0.03] },
+    { text: '비밀번호가 일치하지 않습니다.', layer: 'error', box: [0.1, 0.5, 0.8, 0.03] },
+    { text: '비밀번호 찾기', layer: 'link', box: [0.35, 0.76, 0.3, 0.02] },
+  ],
+  nodes: [
+    { name: 'Button/Primary', kind: 'button', text: '로그인', box: [0.1, 0.6, 0.8, 0.08] },
+    { name: 'Link/FindPw', kind: 'link', text: '비밀번호 찾기', box: [0.3, 0.75, 0.4, 0.04] },
+  ],
+};
+const fakeFigma = { fetchFrames: async () => ({ fileKey: 'K', frames: [figmaFrame], skipped: 0 }) };
+
+test('규칙 기반: 피그마 레이어로 위치를 찾고, 기획서에서 근거 문장을 찾는다 (API 호출 없음)', async () => {
+  const p = mapping.createProject('규칙');
+  await mapping.addFigma(p.id, 'https://www.figma.com/design/K/x', { figma: fakeFigma });
+  mapping.addFile(p.id, { kind: 'spec', fileName: '기획.md', data: Buffer.from(SPEC).toString('base64') });
+  mapping.updateProject(p.id, { tcIds: ['TC-1', 'TC-2'] });
+  const before = requests.length;
+  const v = mapping.analyzeRules(p.id, {});
+  assert.strictEqual(requests.length, before, 'Claude를 부르지 않는다');
+
+  const r = v.results['TC-1'];
+  assert.strictEqual(r.method, 'rules');
+  assert.strictEqual(r.frame, 'F1');
+  assert.deepStrictEqual(r.steps[1].box, [0.1, 0.6, 0.8, 0.08], '버튼 안 글자가 아니라 버튼 레이어 영역');
+  assert.strictEqual(r.steps[1].candidates, 1);
+  assert.deepStrictEqual([r.steps[2].box, r.steps[2].designTextMatch], [[0.1, 0.5, 0.8, 0.03], true]);
+  assert.strictEqual(r.evidence[0].policyId, 'LGN-03');
+  assert.strictEqual(r.confidence.level, 'high', r.confidence.reasons.join());
+
+  assert.strictEqual(v.results['TC-2'].method, 'rules');
+  assert.deepStrictEqual(v.inventory.F1.map((e) => e.name), ['로그인', '비밀번호 찾기'], '피그마 버튼·링크 레이어가 요소 목록');
+  assert.deepStrictEqual(v.coverage.uncovered.map((e) => e.name), ['비밀번호 찾기']);
+});
+
+test('규칙 기반: 캡처 이미지만 있으면 위치를 지어내지 않고 이유를 남긴다', () => {
+  const p = mapping.createProject('캡처만');
+  mapping.addFile(p.id, { kind: 'frame', fileName: 'login.png', data: PNG.toString('base64') });
+  mapping.updateProject(p.id, { tcIds: ['TC-1'] });
+  const r = mapping.analyzeRules(p.id, {}).results['TC-1'];
+  assert.strictEqual(r.frame, '');
+  assert.ok(r.steps.every((s) => !s.box));
+  assert.match(r.warnings.join(), /피그마에서 가져온 화면에서만/);
+  assert.strictEqual(r.confidence.level, 'none');
+});
+
+test('Claude Code 연계: 요청 파일을 만들고, 응답을 API와 같은 규칙으로 검증해 가져온다', () => {
+  const p = mapping.createProject('클로드 코드');
+  mapping.addFile(p.id, { kind: 'frame', fileName: '01_Login.png', data: PNG.toString('base64') });
+  mapping.addFile(p.id, { kind: 'spec', fileName: '기획.md', data: Buffer.from(SPEC).toString('base64') });
+  mapping.updateProject(p.id, { tcIds: ['TC-1', 'TC-3'] });
+  assert.throws(() => mapping.importClaudeCode(p.id), /요청 파일을 만드세요/);
+
+  const ex = mapping.exportForClaudeCode(p.id, {});
+  const md = fs.readFileSync(ex.claudeCode.requestFile, 'utf8');
+  assert.ok(md.includes(path.join(mapping.projDir(p.id), 'frames', 'F1.png')), '화면 파일 경로');
+  assert.ok(md.includes('TC TC-1 "비밀번호 오류 문구"') && md.includes('TC TC-3'), 'TC 문장');
+  assert.ok(md.includes(ex.claudeCode.responseFile));
+  assert.match(ex.prompt, /request\.md 파일을 읽고/);
+  assert.throws(() => mapping.importClaudeCode(p.id), /응답 파일이 아직 없습니다/);
+
+  fs.writeFileSync(ex.claudeCode.responseFile, '﻿' + JSON.stringify({
+    inventory: { F1: [{ name: '로그인 버튼', kind: 'button', text: '로그인', box: [0.1, 0.6, 0.8, 0.08] }, { name: '찾기', kind: 'link', text: '', box: [0.3, 0.75, 0.4, 0.04] }], F9: [] },
+    results: { 'TC-1': answers['TC-1'] },
+  }));
+  const v = mapping.importClaudeCode(p.id);
+  assert.strictEqual(v.imported, 1);
+  const r = v.results['TC-1'];
+  assert.strictEqual(r.method, 'claude-code');
+  assert.strictEqual(r.evidence.length, 1, '지어낸 인용은 API 답과 똑같이 버린다');
+  assert.strictEqual(r.confidence.level, 'high');
+  assert.deepStrictEqual(v.inventory.F1.map((e) => e.name), ['로그인 버튼', '찾기']);
+  assert.ok(v.lastRun.errors.some((e) => /F9/.test(e)) && v.lastRun.errors.some((e) => /TC-3: 응답에 결과가 없습니다/.test(e)));
+
+  fs.writeFileSync(ex.claudeCode.responseFile, '{ 잘못된');
+  assert.throws(() => mapping.importClaudeCode(p.id), /JSON 형식/);
 });
 
 test('ai 설정: 키 원문은 화면에 돌려주지 않는다', () => {
@@ -192,6 +290,19 @@ test('ai 설정: 키 원문은 화면에 돌려주지 않는다', () => {
   assert.strictEqual(s.apiKey, 'sk-ant-…mnop');
   assert.strictEqual(s.apiKeySource, 'saved');
   assert.ok(!JSON.stringify(s).includes('abcdefghij'));
+  assert.throws(() => ai.saveSettings({ apiKey: 'abc123-not-a-claude-key-xxxxx' }), /키 형식이 아닙니다/);
+  assert.throws(() => ai.saveSettings({ apiKey: 'sk-ant-abc def' }), /키 형식이 아닙니다/);
+  assert.strictEqual(ai.publicSettings().apiKey, 'sk-ant-…mnop', '잘못된 키는 저장하지 않는다');
+});
+
+test('checkKey: 무료 모델 조회로 키를 확인하고 오류를 안내한다', async () => {
+  const Anthropic = require('@anthropic-ai/sdk');
+  const ok = await ai.checkKey({ models: { retrieve: async (id) => ({ id, display_name: 'Claude Opus 5.5' }) } }, 'claude-opus-5-5');
+  assert.deepStrictEqual(ok, { ok: true, model: 'claude-opus-5-5', message: '키 정상 · Claude Opus 5.5 사용 가능' });
+  const err = new Anthropic.AuthenticationError(401, { error: { message: 'invalid x-api-key' } }, 'invalid x-api-key', new Headers());
+  const bad = await ai.checkKey({ models: { retrieve: async () => { throw err; } } }, 'claude-opus-5-5');
+  assert.strictEqual(bad.ok, false);
+  assert.match(bad.message, /인증 실패/);
 });
 
 test.after(() => fs.rmSync(tmp, { recursive: true, force: true }));

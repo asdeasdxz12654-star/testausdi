@@ -110,4 +110,4 @@ async function precheck(config, platforms = Object.keys(CHECKS), tools) {
   return results.map((r) => ({ ...r, ok: r.items.every((i) => i.ok), checkedAt: new Date().toISOString() }));
 }
 
-module.exports = { precheck };
+module.exports = { precheck, checkUrl, browserInstalled };

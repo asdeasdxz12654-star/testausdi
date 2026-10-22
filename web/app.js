@@ -136,7 +136,7 @@ async function route() {
     if (active) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   });
   if (v !== 'mapping') { clearInterval(S.mapPoll); S.mapPoll = null; }
-  const views = { dash: renderDash, tcs: () => renderTcs(rest[0]), import: renderImport, mapping: () => renderMapping(rest[0]), elements: renderElements, devices: renderDevices, issues: renderIssues, result: () => renderResult(rest[0], rest[1]) };
+  const views = { dash: renderDash, tcs: () => renderTcs(rest[0]), import: renderImport, mapping: () => renderMapping(rest[0]), settings: renderSettings, elements: renderElements, devices: renderDevices, issues: renderIssues, result: () => renderResult(rest[0], rest[1]) };
   await (views[v] || renderDash)();
 }
 
@@ -629,7 +629,21 @@ function aiSettingsCard(st, onSaved) {
       h('label', { class: 'field' }, `피그마 개인 액세스 토큰${st.figmaTokenSource === 'env' ? ' (환경변수 FIGMA_TOKEN 사용 중)' : ''}`, figIn)),
     h('label', { class: 'check' }, consent, '기획서·디자인 이미지·TC를 Claude API(Anthropic)로 보내는 것에 동의합니다'),
     h('div', { class: 'sub' }, '고객사 자료는 외부 AI 전송이 허용되는지 먼저 확인하세요. 키와 토큰은 이 PC의 data/state/ai.json에만 저장되고 Git에는 올라가지 않습니다.'),
-    h('div', {}, h('button', { class: 'btn primary', type: 'button', onclick: save }, '설정 저장')));
+    h('div', { class: 'row' },
+      h('button', { class: 'btn primary', type: 'button', onclick: save }, '설정 저장'),
+      st.apiKeySource === 'saved' ? confirmButton('API 키 삭제', async () => {
+        const r = await guard(() => api('PUT', '/api/ai/settings', { apiKey: '' }));
+        if (r) { toast('API 키를 삭제했습니다'); onSaved(r); }
+      }, 'btn') : null,
+      st.figmaTokenSource === 'saved' ? confirmButton('피그마 토큰 삭제', async () => {
+        const r = await guard(() => api('PUT', '/api/ai/settings', { figmaToken: '' }));
+        if (r) { toast('피그마 토큰을 삭제했습니다'); onSaved(r); }
+      }, 'btn') : null,
+      h('button', { class: 'btn', type: 'button', disabled: !st.apiKey, onclick: async () => {
+        const r = await guard(() => api('POST', '/api/ai/check'));
+        if (r) toast(r.message, !r.ok);
+      } }, '키 확인 (무료)'),
+      h('span', { class: 'sub' }, '키 확인은 모델 정보 조회라 비용이 들지 않습니다')));
 }
 
 async function renderMapping(pid) {
@@ -637,6 +651,7 @@ async function renderMapping(pid) {
   const v = await guard(() => api('GET', `/api/mapping/${pid}`));
   if (!v) { location.hash = '#mapping'; return; }
   S.map = S.map && S.map.id === pid ? Object.assign(S.map, { v }) : { id: pid, v, sel: null, showGaps: false };
+  S.map.ai = await api('GET', '/api/ai/settings').catch(() => null);
   if (v.status === 'running' && !S.mapPoll) {
     S.mapPoll = setInterval(async () => {
       const nv = await api('GET', `/api/mapping/${pid}`).catch(() => null);
@@ -719,9 +734,11 @@ function drawMapping() {
   const chosen = new Set(v.tcIds);
   const tcBox = h('div', { class: 'tc-pick' }, S.tcs.map((t) => h('label', { class: 'check' },
     h('input', { type: 'checkbox', value: t.id, checked: chosen.has(t.id), disabled: busy }),
-    h('span', { class: 'mono sub' }, t.id), t.title,
-    t.automation === '수동 유지' ? h('span', { class: 'sub' }, ' · 수동 유지') : null,
-    v.results[t.id] ? h('span', { class: 'sub' }, ' · 분석됨') : null)));
+    h('span', { class: 'mono sub' }, t.id),
+    // 제목과 상태 표시를 한 칸에 둔다 (칸이 나뉘면 표시가 다음 줄 좁은 칸으로 밀린다)
+    h('span', {}, t.title,
+      t.automation === '수동 유지' ? h('span', { class: 'sub' }, ' · 수동 유지') : null,
+      v.results[t.id] ? h('span', { class: 'sub' }, ' · 분석됨') : null))));
   const saveTcs = async () => {
     const ids = [...tcBox.querySelectorAll('input:checked')].map((i) => i.value);
     refresh(await guard(() => api('PUT', `/api/mapping/${pid}`, { tcIds: ids })));
@@ -739,15 +756,43 @@ function drawMapping() {
     if (r) { toast('분석을 시작했습니다'); renderMapping(pid); }
   };
   const est = v.estimate;
+  const hasResults = Object.keys(v.results).length > 0;
+  const figmaFrames = v.frames.filter((f) => f.texts && f.texts.length).length;
+  const runRules = async (onlyNew) => {
+    const nv = await guard(() => api('POST', `/api/mapping/${pid}/analyze-rules`, { onlyNew }));
+    if (nv) { toast('규칙 기반 분석을 마쳤습니다'); refresh(nv); }
+  };
+  const runClaudeCode = async (onlyNew) => {
+    const nv = await guard(() => api('POST', `/api/mapping/${pid}/claude-code/export`, { onlyNew }));
+    if (nv) { toast('Claude Code 요청 파일을 만들었습니다'); refresh(nv); }
+  };
+  const importCc = async () => {
+    const nv = await guard(() => api('POST', `/api/mapping/${pid}/claude-code/import`));
+    if (nv) { toast(`Claude Code 결과 ${nv.imported}건을 가져왔습니다`); refresh(nv); }
+  };
+  const mode = (title, cost, desc, buttons) => h('div', { class: 'mode' }, h('div', { class: 'row between' }, h('b', {}, title), h('span', { class: 'pill s-Pass' }, cost)), h('div', { class: 'sub' }, desc), h('div', { class: 'row' }, buttons));
+  const ccPrompt = v.claudeCode ? `${v.claudeCode.requestFile} 파일을 읽고, 안의 지시대로 화면·기획서를 분석해서 ${v.claudeCode.responseFile} 에 결과를 저장해 줘.` : '';
   const runCard = h('section', { class: 'card stack' },
-    h('div', { class: 'row between' }, h('h3', {}, '분석'),
+    h('div', { class: 'row between' }, h('h3', {}, '분석 방법'),
       busy ? h('span', { class: 'sub' }, `${v.phase || '분석 중'} · ${v.progress ? `${v.progress.done}/${v.progress.total}` : ''}`) : null),
     busy && v.progress ? h('div', { class: 'bar' }, h('i', { class: 'Pass', style: `width:${(v.progress.done / Math.max(1, v.progress.total)) * 100}%` })) : null,
-    !busy ? h('div', { class: 'row' },
-      h('button', { class: 'btn primary', type: 'button', disabled: !est.calls, onclick: () => start(true) }, est.calls ? `새 TC 분석 (호출 ${est.calls}회, 약 $${est.usd})` : '새로 분석할 TC 없음'),
-      Object.keys(v.results).length ? h('button', { class: 'btn', type: 'button', onclick: () => start(false) }, `전체 다시 분석 (호출 ${v.estimateAll.calls}회, 약 $${v.estimateAll.usd})`) : null,
-      h('a', { class: 'btn small', href: '#mapping' }, '설정')) : null,
-    h('div', { class: 'sub' }, '비용은 Claude Opus 5.5 기준 대략값입니다. 기획서·디자인은 첫 호출 뒤 캐시되어 TC가 늘어도 자료 비용은 크게 늘지 않습니다.'),
+    !busy ? h('div', { class: 'modes' },
+      mode('규칙 기반', '무료', `AI 없이 피그마 텍스트·버튼 레이어와 텍스트 기획서로 찾습니다. 피그마에서 가져온 화면 ${figmaFrames}개에서만 위치를 찾고, 캡처 이미지는 읽지 못합니다.`, [
+        h('button', { class: 'btn primary', type: 'button', onclick: () => runRules(true) }, '새 TC 분석'),
+        hasResults ? h('button', { class: 'btn', type: 'button', onclick: () => runRules(false) }, '전체 다시') : null]),
+      mode('Claude Code', '구독 안에서', '요청 파일을 만들면 Claude Code 대화창에서 분석을 맡깁니다. 캡처·PDF도 읽고 정확도는 API와 같은 수준이며, API 비용이 들지 않습니다.', [
+        h('button', { class: 'btn primary', type: 'button', onclick: () => runClaudeCode(true) }, '요청 파일 만들기'),
+        hasResults ? h('button', { class: 'btn', type: 'button', onclick: () => runClaudeCode(false) }, '전체 TC로 만들기') : null]),
+      mode('Claude API', est.calls ? `유료 · 약 $${est.usd}` : '유료', `버튼 한 번으로 자동 분석합니다. platform.claude.com 크레딧에서 사용한 만큼 결제됩니다${S.map.ai && S.map.ai.apiKey ? '' : ' (API 키 없음 · 설정에서 입력)'}.`, [
+        h('button', { class: 'btn', type: 'button', disabled: !est.calls || !(S.map.ai && S.map.ai.apiKey), onclick: () => start(true) }, est.calls ? `새 TC 분석 (호출 ${est.calls}회)` : '새로 분석할 TC 없음'),
+        hasResults ? h('button', { class: 'btn', type: 'button', disabled: !(S.map.ai && S.map.ai.apiKey), onclick: () => start(false) }, `전체 다시 (약 $${v.estimateAll.usd})`) : null])) : null,
+    v.claudeCode && !busy ? h('div', { class: 'notice stack' },
+      h('b', {}, `Claude Code 요청 · TC ${v.claudeCode.tcIds.length}건 · ${fmtTime(v.claudeCode.at)}`),
+      h('div', {}, 'Claude Code 대화창에 아래 문장을 붙여넣으세요. 분석이 끝나면 "응답 가져오기"를 누릅니다.'),
+      h('pre', { style: 'white-space:pre-wrap' }, ccPrompt),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn small', type: 'button', onclick: () => copyText(ccPrompt) }, '요청 문장 복사'),
+        h('button', { class: 'btn small primary', type: 'button', onclick: importCc }, '응답 가져오기'))) : null,
     v.error ? h('div', { class: 'errbox' }, v.error) : null,
     v.lastRun && v.lastRun.errors.length && !busy ? h('div', { class: 'errbox' }, v.lastRun.errors.slice(0, 5).join('\n')) : null);
 
@@ -799,7 +844,7 @@ function reviewCard(v, refresh) {
       v.coverage.noEvidence.length ? h('div', { class: 'notice' }, `기획서 근거가 없는 TC: ${v.coverage.noEvidence.join(', ')}`) : null,
       v.coverage.missingStates.length ? h('div', { class: 'notice' }, '디자인에 없는 상태: ', v.coverage.missingStates.map((m) => `${m.tcId}(${m.states.join(', ')})`).join(' · ')) : null)
     : h('div', { class: 'stack' },
-      h('div', {}, h('div', { class: 'mono sub' }, r.tcId), h('b', {}, r.title)),
+      h('div', {}, h('div', { class: 'mono sub' }, `${r.tcId} · ${{ rules: '규칙 기반', 'claude-code': 'Claude Code', api: 'Claude API' }[r.method] || 'Claude API'} 분석`), h('b', {}, r.title)),
       h('div', {}, confPill(r.confidence.level), ' ', h('span', { class: 'sub' }, r.confidence.reasons.join(' · '))),
       h('ol', { class: 'steps' }, r.steps.map((s) => {
         const sel = h('select', { 'aria-label': `${s.lineNo}번 요소`, onchange: (e) => {
@@ -844,6 +889,143 @@ function reviewCard(v, refresh) {
           renderMapping(pid);
         } }, `승인한 ${approvedCount}건 반영`))),
     h('div', { class: 'map3' }, list, frameView, detail));
+}
+
+// ---------- 설정 ----------
+async function renderSettings() {
+  const [cfg, meta, st] = await Promise.all([api('GET', '/api/config'), api('GET', '/api/settings/devices'), api('GET', '/api/ai/settings')]);
+  const d = JSON.parse(JSON.stringify(cfg));
+  d.ai = d.ai || { model: 'claude-opus-5-5', effort: 'high' };
+  d.android = d.android || {};
+  d.ios = d.ios || {};
+  let dirty = false;
+  const dirtyEl = h('span', { class: 'sub warn', hidden: true }, '저장하지 않은 변경 있음');
+  const mark = () => { dirty = true; dirtyEl.hidden = false; };
+  window.onbeforeunload = () => (dirty ? true : undefined);
+
+  // 점 표기 경로로 값을 읽고 쓴다 (예: "pc.viewport.width")
+  const getP = (p) => p.split('.').reduce((o, k) => (o ? o[k] : undefined), d);
+  const setP = (p, v) => { const ks = p.split('.'); const last = ks.pop(); ks.reduce((o, k) => (o[k] = o[k] || {}), d)[last] = v; };
+  const field = (label, p, { type = 'text', hint, scale = 1, placeholder, wide } = {}) => h('label', { class: `field${wide ? ' wide' : ''}` }, label,
+    h('input', { type, id: `cfg-${p}`, value: getP(p) === undefined ? '' : String(type === 'number' ? Math.round((getP(p) / scale) * 1000) / 1000 : getP(p)), placeholder, oninput: (e) => {
+      // 초 → 밀리초처럼 키우는 값은 정수로, % → 비율처럼 줄이는 값은 그대로 둔다
+      const n = Number(e.target.value) * scale;
+      setP(p, type === 'number' ? (scale >= 1 ? Math.round(n) : n) : e.target.value);
+      mark();
+    } }),
+    hint ? h('span', { class: 'sub' }, hint) : null);
+  const select = (label, p, options) => h('label', { class: 'field' }, label,
+    h('select', { id: `cfg-${p}`, onchange: (e) => { setP(p, e.target.value); mark(); } }, options.map(([v, t]) => h('option', { value: v, selected: getP(p) === v }, t))));
+
+  // 대상 사이트
+  const inspectOut = h('div', { class: 'stack' });
+  const attrInput = () => document.getElementById('cfg-testIdAttribute');
+  const inspect = async () => {
+    inspectOut.replaceChildren(h('span', { class: 'sub' }, '브라우저로 여는 중… (최대 20초)'));
+    const r = await guard(() => api('POST', '/api/settings/inspect', { url: d.baseURL }));
+    if (!r) { inspectOut.replaceChildren(); return; }
+    inspectOut.replaceChildren(
+      h('div', { class: r.ok ? 'notice' : 'errbox' }, r.message),
+      r.attributes.length ? h('div', { class: 'row' }, h('span', { class: 'sub' }, '이 페이지에서 찾은 식별자 속성 (눌러서 선택):'),
+        r.attributes.map((a) => h('button', { class: 'chip', type: 'button', 'aria-pressed': String(d.testIdAttribute === a.name), onclick: () => {
+          d.testIdAttribute = a.name; attrInput().value = a.name; mark();
+          inspectOut.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(c.textContent.startsWith(`${a.name} `))));
+        } }, `${a.name} ${a.count}개`))) : (r.ok ? h('div', { class: 'sub warn' }, '테스트용 식별자 속성을 찾지 못했습니다. 개발팀에 data-testid 부여를 요청하거나 요소 맵에서 CSS·텍스트 방식으로 지정하세요') : null));
+  };
+  const siteCard = h('section', { class: 'card stack' },
+    h('h3', {}, '대상 사이트'),
+    h('div', { class: 'form-grid' },
+      field('프로젝트 이름', 'project'),
+      field('대상 사이트 주소', 'baseURL', { placeholder: 'https://qa.example.com' }),
+      field('환경', 'env', { placeholder: 'qa / stg' }),
+      field('식별자 속성', 'testIdAttribute', { placeholder: 'data-testid' })),
+    h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: inspect }, '접속 확인'),
+      h('span', { class: 'sub' }, '주소로 접속해 응답과, 요소 식별에 쓸 수 있는 속성(data-testid 등)을 찾아봅니다')),
+    inspectOut,
+    h('div', { class: 'sub' }, '주소를 바꾸면 요소 맵의 화면 경로와 식별자, TC도 그 사이트에 맞게 바꿔야 합니다. 지금 들어 있는 예시는 saucedemo 전용입니다.'));
+
+  // 기기
+  const desktops = meta.devices.filter((x) => !x.mobile);
+  const mobiles = meta.devices.filter((x) => x.mobile);
+  const chosen = new Set(d.mw.devices);
+  const mwSearch = h('input', { type: 'text', id: 'mwSearch', placeholder: '기기 찾기 (예: Galaxy, iPhone)', style: 'max-width:260px' });
+  const mwList = h('div', { class: 'tc-pick', style: 'max-height:220px' });
+  const mwCount = h('span', { class: 'sub' });
+  const drawMw = () => {
+    const q = mwSearch.value.trim().toLowerCase();
+    mwCount.textContent = `MW 기기 프리셋 · ${chosen.size}개 선택 · 고른 기기마다 같은 TC가 한 번씩 실행됩니다`;
+    // 고른 기기를 맨 위에 둔다
+    const shown = mobiles.filter((m) => chosen.has(m.name) || !q || m.name.toLowerCase().includes(q))
+      .sort((a, b) => Number(chosen.has(b.name)) - Number(chosen.has(a.name)));
+    mwList.replaceChildren(...shown.map((m) => h('label', { class: 'check', style: 'grid-template-columns:18px minmax(0,1fr) auto' },
+      h('input', { type: 'checkbox', checked: chosen.has(m.name), onchange: (e) => { if (e.target.checked) chosen.add(m.name); else chosen.delete(m.name); d.mw.devices = mobiles.map((x) => x.name).filter((n) => chosen.has(n)); mark(); mwCount.textContent = `MW 기기 프리셋 · ${chosen.size}개 선택 · 고른 기기마다 같은 TC가 한 번씩 실행됩니다`; } }),
+      h('span', {}, m.name, h('span', { class: 'sub' }, ` ${m.width}×${m.height}`)),
+      h('span', { class: m.installed ? 'sub' : 'sub warn' }, m.installed ? m.browser : `${m.browser} 설치 필요`))));
+  };
+  mwSearch.addEventListener('input', drawMw);
+  drawMw();
+  const devCard = h('section', { class: 'card stack' },
+    h('h3', {}, '기기'),
+    h('div', { class: 'form-grid' },
+      select('PC 브라우저', 'pc.device', desktops.map((x) => [x.name, `${x.name}${x.installed ? '' : ' (설치 필요)'}`])),
+      field('해상도 너비', 'pc.viewport.width', { type: 'number' }),
+      field('해상도 높이', 'pc.viewport.height', { type: 'number' })),
+    h('div', { class: 'row between' }, mwCount, mwSearch),
+    mwList,
+    h('div', { class: 'sub' }, '"설치 필요" 브라우저는 터미널에서 npx playwright install webkit (또는 firefox)으로 설치합니다.'));
+
+  const appCard = h('section', { class: 'card stack' },
+    h('h3', {}, '앱'),
+    h('div', { class: 'form-grid' },
+      field('안드로이드 패키지명', 'android.appId', { placeholder: 'com.example.shop' }),
+      field('APK 경로 (선택)', 'android.apkPath', { placeholder: 'builds/app-qa.apk' }),
+      field('기기 시리얼 (선택)', 'android.serial', { placeholder: '여러 대일 때' }),
+      field('아이폰 번들 ID', 'ios.appId', { placeholder: 'com.example.shop' }),
+      field('Mac 에이전트 주소', 'ios.agentUrl', { placeholder: 'http://192.168.0.24:4723', wide: true })));
+
+  const runCard = h('section', { class: 'card stack' },
+    h('h3', {}, '실행'),
+    h('div', { class: 'form-grid' },
+      field('실패 시 재시도', 'run.retries', { type: 'number', hint: '0~3회. 재시도에서 통과하면 Flaky' }),
+      field('동시 실행 수', 'run.workers', { type: 'number', hint: 'PC·MW 브라우저 수' }),
+      field('TC 제한 시간 (초)', 'run.timeoutMs', { type: 'number', scale: 1000 }),
+      field('앱 TC 제한 시간 (초)', 'run.mobileTimeoutMs', { type: 'number', scale: 1000 }),
+      field('동작 대기 (초)', 'run.actionTimeoutMs', { type: 'number', scale: 1000, hint: '요소가 나타나길 기다리는 시간' }),
+      field('확인 대기 (초)', 'run.expectTimeoutMs', { type: 'number', scale: 1000 })));
+
+  const exitCard = h('section', { class: 'card stack' },
+    h('h3', {}, '종료 기준 · Flaky 격리'),
+    h('div', { class: 'form-grid' },
+      field('P1 Fail 허용 건수', 'exitCriteria.p1FailMax', { type: 'number' }),
+      field('미해결 Critical 결함', 'exitCriteria.criticalOpenMax', { type: 'number' }),
+      field('Flaky 비율 상한 (%)', 'exitCriteria.flakyRateMax', { type: 'number', scale: 0.01 }),
+      field('Blocked 허용 건수', 'exitCriteria.blockedMax', { type: 'number' }),
+      field('격리 판단: 최근 실행 수', 'quarantine.window', { type: 'number' }),
+      field('격리 판단: Flaky 횟수', 'quarantine.flakyThreshold', { type: 'number', hint: '최근 실행 중 이 횟수 이상 Flaky면 격리' })),
+    h('div', { class: 'sub' }, '종료 기준은 실행 현황의 "종료 기준 충족" 판정과 CI 성공·실패에 쓰입니다.'));
+
+  const aiCard = h('section', { class: 'card stack' },
+    h('h3', {}, 'AI (영역 매핑)'),
+    h('div', { class: 'form-grid' },
+      select('모델', 'ai.model', meta.models.map((m) => [m, m])),
+      select('생각 깊이', 'ai.effort', meta.efforts.map((x) => [x, x]))),
+    h('div', { class: 'sub' }, '기본값은 claude-opus-5-5 · high입니다. 깊이를 낮추면 비용과 시간이 줄지만 매핑 정확도가 떨어질 수 있습니다.'));
+
+  const save = async () => {
+    // 비율 입력은 %에서 바꾼 값이라 소수 둘째 자리로 맞춘다
+    d.exitCriteria.flakyRateMax = Math.round(Number(getP('exitCriteria.flakyRateMax')) * 100) / 100;
+    const saved = await guard(() => api('PUT', '/api/config', d));
+    if (!saved) return;
+    dirty = false;
+    S.config = saved;
+    document.getElementById('projName').textContent = `${saved.project} · ${saved.env} · v${S.meta.version}`;
+    toast('설정을 저장했습니다');
+    renderSettings();
+  };
+  const bar = h('section', { class: 'card row between' },
+    h('div', {}, h('h2', {}, '설정'), h('div', { class: 'sub' }, 'data/config.json에 저장됩니다. 다음 실행부터 적용됩니다.')),
+    h('div', { class: 'row' }, dirtyEl, h('button', { class: 'btn', type: 'button', onclick: () => { dirty = false; renderSettings(); } }, '되돌리기'), h('button', { class: 'btn primary', type: 'button', onclick: save }, '저장')));
+  app().replaceChildren(bar, siteCard, devCard, appCard, runCard, exitCard, aiCard, aiSettingsCard(st, () => renderSettings()));
 }
 
 // ---------- 요소 맵 ----------
