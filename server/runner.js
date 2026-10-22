@@ -53,10 +53,11 @@ function deviceLabel(project, config) {
   return PLATFORM_LABELS[project.platform];
 }
 
-function selectTcs({ tcIds, tags }) {
+function selectTcs({ tcIds, tags, excludeTags }) {
   let tcs = store.listTcs().filter((t) => t.automation !== '수동 유지');
   if (tcIds && tcIds.length) tcs = tcs.filter((t) => tcIds.includes(t.id));
   if (tags && tags.length) tcs = tcs.filter((t) => (t.tags || []).some((g) => tags.includes(g)));
+  if (excludeTags && excludeTags.length) tcs = tcs.filter((t) => !(t.tags || []).some((g) => excludeTags.includes(g)));
   return tcs;
 }
 

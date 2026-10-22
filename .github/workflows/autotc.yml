@@ -1,0 +1,99 @@
+# AutoTC CI: 단위 테스트 → PC 웹·MW 자동화 실행 → 요약·JUnit·증적 업로드
+# - main 푸시 / PR: @smoke
+# - 매일 03:00 (KST): @regression
+# - 수동 실행: 태그·플랫폼 지정
+# 종료 기준(data/config.json의 exitCriteria)을 못 맞추면 워크플로가 실패합니다.
+# 슬랙 알림은 저장소 Secrets에 AUTOTC_SLACK_WEBHOOK을 넣으면 켜집니다.
+name: AutoTC
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: '실행할 태그 (쉼표로 구분, 비우면 전체)'
+        required: false
+        default: 'smoke'
+      platforms:
+        description: '플랫폼 (pc, mw)'
+        required: false
+        default: 'pc,mw'
+
+concurrency:
+  group: autotc-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: 단위 테스트
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  e2e:
+    name: 자동화 실행
+    needs: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Chromium 설치
+        run: npx playwright install --with-deps chromium
+
+      - name: 실행 대상 결정
+        id: suite
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TAGS: ${{ inputs.tags }}
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          case "$EVENT" in
+            schedule)          tags="regression"; platforms="pc,mw"; label="야간 회귀" ;;
+            workflow_dispatch) tags="$INPUT_TAGS"; platforms="${INPUT_PLATFORMS:-pc,mw}"; label="수동 실행" ;;
+            *)                 tags="smoke"; platforms="pc,mw"; label="스모크 ${GITHUB_SHA::7}" ;;
+          esac
+          {
+            echo "tags=$tags"
+            echo "platforms=$platforms"
+            echo "label=$label"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: AutoTC 실행
+        env:
+          TAGS: ${{ steps.suite.outputs.tags }}
+          PLATFORMS: ${{ steps.suite.outputs.platforms }}
+          LABEL: ${{ steps.suite.outputs.label }}
+          AUTOTC_SLACK_WEBHOOK: ${{ secrets.AUTOTC_SLACK_WEBHOOK }}
+        run: |
+          args=(--platforms "$PLATFORMS" --exclude-tags demo-bug --label "$LABEL" --out autotc-report)
+          if [ -n "$TAGS" ]; then args+=(--tags "$TAGS"); fi
+          npm run ci -- "${args[@]}"
+
+      - name: 리포트·증적 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autotc-${{ github.run_number }}
+          path: |
+            autotc-report/
+            data/state/
+          retention-days: 14
+          if-no-files-found: ignore

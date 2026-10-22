@@ -15,6 +15,7 @@
 | 명령 | 설명 |
 |---|---|
 | `npm start` | 콘솔 실행 (exe와 같음) |
+| `npm run ci -- --tags smoke` | 화면 없이 실행하고 종료 기준으로 성공/실패 판정 (아래 CI 참고) |
 | `npm test` | 핵심 로직 단위 테스트 |
 | `npm run build:exe` | `launcher/AutoTC.cs` → `AutoTC.exe` 빌드 (Windows 기본 csc.exe 사용) |
 
@@ -38,6 +39,31 @@
 - 실행마다 logcat을 비우고 끝나면 저장합니다. 대상 앱의 `FATAL EXCEPTION`·ANR이 있으면 오류 유형 CRASH, 결함 심각도 Critical로 잡습니다.
 - 식별자가 없는 요소를 쓰는 TC는 실행하지 않고 Blocked로 남깁니다. 요소 맵의 "개발팀 요청 목록"으로 요청하세요.
 - 기기는 한 대에서 TC를 하나씩 실행합니다. TC 하나의 제한 시간은 `run.mobileTimeoutMs`(기본 5분)입니다.
+
+## CI (GitHub Actions)
+
+`.github/workflows/autotc.yml`이 GitHub에 올라가면 자동으로 동작합니다.
+
+| 언제 | 무엇을 |
+|---|---|
+| `main` 푸시, PR | 단위 테스트 → `@smoke` TC를 PC 웹·MW에서 실행 |
+| 매일 03:00 (KST) | `@regression` TC 실행 (야간 회귀) |
+| Actions 탭에서 수동 실행 | 태그·플랫폼을 지정해 실행 |
+
+- 종료 기준(`data/config.json`의 `exitCriteria`)을 못 맞추면 워크플로가 실패로 표시됩니다.
+- 실행 요약이 Actions 실행 화면에 표로 나오고, `summary.md`, `junit.xml`, 스크린샷·영상·트레이스, Playwright HTML 리포트를 아티팩트로 14일간 보관합니다.
+- 결함을 일부러 심은 예시 TC(`demo-bug` 태그)는 CI에서 제외합니다.
+- 슬랙 알림: 저장소 Settings → Secrets에 `AUTOTC_SLACK_WEBHOOK`(수신 웹훅 URL)을 넣으면 실행마다 결과를 보냅니다.
+- CI의 이슈·이력은 실행마다 새로 시작합니다. 이슈를 이어서 관리하는 것은 로컬 콘솔에서 합니다.
+
+명령줄 옵션:
+
+```
+npm run ci -- --platforms pc,mw --tags smoke --exclude-tags demo-bug --label "스모크" --out report
+  --tc TC-LOGIN-001,TC-CART-001   지정한 TC만
+  --no-gate                       종료 기준을 못 맞춰도 성공 처리 (리포트만 필요할 때)
+종료 코드: 0 충족 · 1 미충족 · 2 실행 오류
+```
 
 ## 화면
 
@@ -77,10 +103,13 @@
 AutoTC.exe            런처 (node scripts/start.js 실행)
 launcher/AutoTC.cs    런처 소스
 scripts/start.js      첫 실행 설치 → 서버 시작 → 브라우저 열기
+scripts/ci.js         명령줄 실행 (CI용), 요약·JUnit 생성, 슬랙 알림
+.github/workflows/    GitHub Actions 워크플로
 server/
   index.js            로컬 HTTP 서버 + API
   runner.js           사전 점검 → 생성 → Playwright·Maestro 실행 → 판정 → 분류 → 이슈 반영
   android.js          안드로이드 어댑터 (ADB 기기 정보, Maestro 실행, logcat, 결과 해석)
+  report.js           CI용 Markdown 요약, JUnit XML
   generator.js        TC JSON → Playwright(.spec.ts) / Maestro(YAML)
   tc.js               TC 검증, 공통 흐름 펼치기, 테스트 데이터 치환
   classify.js         오류 유형, 실패 분류, 시그니처, 결함 초안
@@ -98,4 +127,3 @@ test/                 단위 테스트
 - 안드로이드 여러 기기 동시 실행 (지금은 한 대에서 순서대로)
 - 엑셀 TC 가져오기
 - 기획서·피그마 기반 TC 영역 매핑 (기획서 12장)
-- GitHub Actions 연동
