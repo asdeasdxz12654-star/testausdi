@@ -542,8 +542,12 @@ function tcEditor() {
       h('button', { class: 'btn primary', type: 'button', onclick: save }, '저장'))),
     form,
     d.source ? h('details', { class: 'notice', open: d.automation === '수동 유지' },
-      h('summary', {}, `${d.source.url ? '스프레드시트' : '엑셀'} 원문 · ${d.source.file} ${d.source.sheet} ${d.source.row}행${d.source.originalId ? ` · 원래 ID ${d.source.originalId}` : ''}`),
+      h('summary', {}, d.generated
+        ? `${d.source.file} · ${GEN_METHOD[d.generated.method] || d.generated.method}${d.generated.technique ? ` · ${TECH[d.generated.technique] || d.generated.technique}` : ''} · 초안 ${d.generated.draft}${d.generated.conditionIds.length ? ` · 조건 ${d.generated.conditionIds.join(', ')}` : ''}`
+        : `${d.source.url ? '스프레드시트' : '엑셀'} 원문 · ${d.source.file} ${d.source.sheet} ${d.source.row}행${d.source.originalId ? ` · 원래 ID ${d.source.originalId}` : ''}`),
       d.source.url ? h('div', { style: 'margin-top:6px' }, h('a', { href: d.source.url, target: '_blank', rel: 'noopener' }, '원본 시트 열기')) : null,
+      d.generated && d.generated.project ? h('div', { style: 'margin-top:6px' }, h('a', { href: `#generate/${encodeURIComponent(d.generated.project)}` }, '생성 프로젝트 열기'),
+        h('span', { class: 'sub' }, d.generated.approvedAt ? ` · 승인 ${new Date(d.generated.approvedAt).toLocaleString()}` : '')) : null,
       h('div', { class: 'grid2', style: 'margin-top:8px' },
         h('div', {}, h('div', { class: 'sub' }, '테스트 절차'), h('pre', { style: 'white-space:pre-wrap' }, d.source.steps || '-')),
         h('div', {}, h('div', { class: 'sub' }, '기대결과'), h('pre', { style: 'white-space:pre-wrap' }, d.source.expected || '-'))),
