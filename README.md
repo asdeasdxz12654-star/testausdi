@@ -107,7 +107,7 @@ AI가 지어낸 답을 걸러내는 규칙:
 
 예시 TC: `TC-API-001~003`(공개 연습 API jsonplaceholder, 스키마·등록·404, 데이터 행), `TC-LOGIN-005`(로그인 입력 검증 3행), `TC-VISUAL-001`(로그인 화면 비교), `TC-A11Y-001`(로그인 화면 접근성).
 
-**처음 실행할 때**: 로그인 TC는 비밀값 `SAUCE_PASSWORD`가 필요합니다. 설정 → 비밀값에서 `SAUCE_PASSWORD`에 saucedemo 로그인 화면에 공개된 비밀번호를 넣으세요. CI에서는 저장소 Settings → Secrets and variables → Actions에 같은 이름으로 넣습니다.
+**처음 실행할 때**: 로그인 TC는 비밀값 `SAUCE_PASSWORD`가 필요합니다. 설정 → 비밀값에서 `SAUCE_PASSWORD`에 saucedemo 로그인 화면에 공개된 비밀번호를 넣으세요. CI에서 수동 실행할 때는 저장소 Settings → Secrets and variables → Actions에 같은 이름으로 넣습니다.
 
 ## CI (GitHub Actions)
 
@@ -115,14 +115,15 @@ AI가 지어낸 답을 걸러내는 규칙:
 
 | 언제 | 무엇을 |
 |---|---|
-| `main` 푸시, PR | 단위 테스트 · 비밀값 평문 검사 → `@smoke` TC를 PC 웹·MW·API에서 실행 |
-| 매일 03:00 (KST) | `@regression` TC 실행 (야간 회귀) |
-| Actions 탭에서 수동 실행 | 태그·플랫폼을 지정해 실행 |
+| `main` 푸시, PR | 단위 테스트 · 비밀값 평문 검사 (예시 사이트 saucedemo는 자동으로 돌리지 않음) |
+| Actions 탭에서 수동 실행 | 단위 테스트 후 태그·플랫폼을 지정해 자동화 실행 |
+
+실제 대상 사이트로 바꾼 뒤 푸시·야간 자동 실행이 필요하면 워크플로 `e2e` 작업의 `if:` 조건을 지우고 `schedule`을 추가합니다.
 
 - 종료 기준(`data/config.json`의 `exitCriteria`)을 못 맞추면 워크플로가 실패로 표시됩니다.
 - 실행 요약이 Actions 실행 화면에 표로 나오고, `summary.md`, `junit.xml`, 스크린샷·영상·트레이스, Playwright HTML 리포트를 아티팩트로 14일간 보관합니다.
 - 결함을 일부러 심은 예시 TC(`demo-bug` 태그)와 화면 비교 TC(`visual` 태그, 리눅스 기준 이미지가 아직 없음)는 CI에서 제외합니다. 리눅스 기준 이미지를 `--update-baselines`로 만들어 커밋하면 `visual`도 켤 수 있습니다.
-- 로그인 TC는 저장소 Secrets의 `SAUCE_PASSWORD`가 있어야 실행됩니다 (없으면 Blocked → 종료 기준 미충족).
+- 수동 실행에서 로그인 TC는 저장소 Secrets의 `SAUCE_PASSWORD`가 있어야 실행됩니다 (없으면 Blocked → 종료 기준 미충족).
 - 슬랙 알림: 저장소 Settings → Secrets에 `AUTOTC_SLACK_WEBHOOK`(수신 웹훅 URL)을 넣으면 실행마다 결과를 보냅니다.
 - CI의 이슈·이력은 실행마다 새로 시작합니다. 이슈를 이어서 관리하는 것은 로컬 콘솔에서 합니다.
 

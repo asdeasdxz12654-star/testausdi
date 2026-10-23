@@ -1,10 +1,9 @@
-# AutoTC CI: 단위 테스트·비밀값 검사 → PC 웹·MW·API 자동화 실행 → 요약·JUnit·증적 업로드
-# - main 푸시 / PR: @smoke
-# - 매일 03:00 (KST): @regression
-# - 수동 실행: 태그·플랫폼 지정
-# 종료 기준(data/config.json의 exitCriteria)을 못 맞추면 워크플로가 실패합니다.
+# AutoTC CI
+# - main 푸시 / PR: 단위 테스트 · 비밀값 평문 검사만 (예시 사이트 saucedemo는 자동으로 돌리지 않음)
+# - 수동 실행(Actions 탭): 태그·플랫폼을 지정해 PC 웹·MW·API 자동화 실행 → 요약·JUnit·증적 업로드
+# 자동화 실행은 종료 기준(data/config.json의 exitCriteria)을 못 맞추면 실패합니다.
 # 슬랙 알림은 저장소 Secrets에 AUTOTC_SLACK_WEBHOOK을 넣으면 켜집니다.
-# 테스트 계정 비밀번호는 저장소 Secrets에 SAUCE_PASSWORD로 넣습니다 (data/testdata.json의 {"secret": "SAUCE_PASSWORD"}).
+# 비밀값({"secret": "NAME"})은 저장소 Secrets에 같은 이름으로 넣고 아래 AutoTC 실행 env에 추가합니다.
 # 화면 비교(@visual)는 OS별 기준 이미지가 필요해 CI에서는 리눅스 기준 이미지를 커밋한 뒤에 켭니다.
 name: AutoTC
 
@@ -12,8 +11,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: '0 18 * * *'
   workflow_dispatch:
     inputs:
       tags:
@@ -50,6 +47,7 @@ jobs:
   e2e:
     name: 자동화 실행
     needs: unit
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -65,15 +63,10 @@ jobs:
       - name: 실행 대상 결정
         id: suite
         env:
-          EVENT: ${{ github.event_name }}
           INPUT_TAGS: ${{ inputs.tags }}
           INPUT_PLATFORMS: ${{ inputs.platforms }}
         run: |
-          case "$EVENT" in
-            schedule)          tags="regression"; platforms="pc,mw,api"; label="야간 회귀" ;;
-            workflow_dispatch) tags="$INPUT_TAGS"; platforms="${INPUT_PLATFORMS:-pc,mw,api}"; label="수동 실행" ;;
-            *)                 tags="smoke"; platforms="pc,mw,api"; label="스모크 ${GITHUB_SHA::7}" ;;
-          esac
+          tags="$INPUT_TAGS"; platforms="${INPUT_PLATFORMS:-pc,mw,api}"; label="수동 실행 ${GITHUB_SHA::7}"
           {
             echo "tags=$tags"
             echo "platforms=$platforms"
