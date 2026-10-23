@@ -5,16 +5,18 @@ const fs = require('fs');
 const path = require('path');
 
 const HELP = `사용법: npm run ci -- [옵션]
-  --platforms pc,mw        실행할 플랫폼 (기본 pc,mw)
+  --platforms pc,mw,api    실행할 플랫폼 (기본 pc,mw,api)
   --tags smoke             이 태그가 붙은 TC만 실행
   --exclude-tags demo-bug  이 태그가 붙은 TC는 제외
   --tc TC-LOGIN-001,...    지정한 TC만 실행
   --label "야간 회귀"       실행 이름
   --out <폴더>             summary.md, junit.xml을 복사할 폴더
-  --no-gate                종료 기준을 못 맞춰도 종료 코드 0 (리포트만 필요할 때)`;
+  --update-baselines       화면 비교 기준 이미지를 이번 화면으로 갱신
+  --no-gate                종료 기준을 못 맞춰도 종료 코드 0 (리포트만 필요할 때)
+비밀값은 같은 이름의 환경변수로 넣습니다 (예: SAUCE_PASSWORD).`;
 
 function parseArgs(argv) {
-  const opts = { platforms: ['pc', 'mw'], gate: true };
+  const opts = { platforms: ['pc', 'mw', 'api'], gate: true };
   const list = (v) => String(v || '').split(',').map((s) => s.trim()).filter(Boolean);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -31,6 +33,7 @@ function parseArgs(argv) {
     else if (a === '--label') opts.label = next();
     else if (a === '--out') opts.out = next();
     else if (a === '--no-gate') opts.gate = false;
+    else if (a === '--update-baselines') opts.updateBaselines = true;
     else if (a === '--help' || a === '-h') opts.help = true;
     else throw new Error(`알 수 없는 옵션: ${a}`);
   }
@@ -72,7 +75,7 @@ async function main() {
   try {
     run = await new Promise((resolve, reject) => {
       try {
-        const started = runner.startRun({ platforms: opts.platforms, tags: opts.tags, excludeTags: opts.excludeTags, tcIds: opts.tcIds, label: opts.label }, { onDone: resolve });
+        const started = runner.startRun({ platforms: opts.platforms, tags: opts.tags, excludeTags: opts.excludeTags, tcIds: opts.tcIds, label: opts.label, updateBaselines: opts.updateBaselines }, { onDone: resolve });
         console.log(`[AutoTC] 실행 시작 ${started.id} · ${started.label} · TC ${started.tcIds.length}건 · ${opts.platforms.join(', ')}`);
       } catch (e) { reject(e); }
     });

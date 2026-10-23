@@ -286,7 +286,7 @@ test('Claude Code 연계: 요청 파일을 만들고, 응답을 API와 같은 �
 });
 
 test('ai 설정: 키 원문은 화면에 돌려주지 않는다', () => {
-  const s = ai.saveSettings({ apiKey: 'sk-ant-api03-abcdefghijklmnop', figmaToken: 'figd_1234567890' });
+  const s = ai.saveSettings({ apiKey: 'sk-ant-api03-abcdefghijklmnop', figmaToken: 'figd_1234567890' }); // 가짜 키 secret-scan:allow
   assert.strictEqual(s.apiKey, 'sk-ant-…mnop');
   assert.strictEqual(s.apiKeySource, 'saved');
   assert.ok(!JSON.stringify(s).includes('abcdefghij'));

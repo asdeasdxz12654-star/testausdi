@@ -70,6 +70,13 @@ const saveElements = (data) => writeJson(path.join(P.DATA, 'elements.json'), dat
 const getFlows = () => readJson(path.join(P.DATA, 'flows.json'), {});
 const getTestData = () => readJson(path.join(P.DATA, 'testdata.json'), {});
 
+// API 응답 명세(JSON Schema). data/schemas/<이름>.json
+function getSchemas() {
+  const dir = path.join(P.DATA, 'schemas');
+  if (!fs.existsSync(dir)) return {};
+  return Object.fromEntries(fs.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => [path.basename(f, '.json'), readJson(path.join(dir, f))]));
+}
+
 const getIssues = () => readJson(path.join(P.STATE, 'issues.json'), []);
 const saveIssues = (issues) => writeJson(path.join(P.STATE, 'issues.json'), issues);
 const getHistory = () => readJson(path.join(P.STATE, 'history.json'), {});
@@ -104,7 +111,7 @@ function listRuns() {
 module.exports = {
   HttpError, readJson, writeJson, assertId,
   listTcs, getTc, saveTc, deleteTc,
-  getConfig, getElements, saveElements, getFlows, getTestData,
+  getConfig, getElements, saveElements, getFlows, getTestData, getSchemas,
   getIssues, saveIssues, getHistory, saveHistory,
   getRun, saveRun, listRuns,
 };

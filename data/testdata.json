@@ -1,7 +1,9 @@
 {
   "account": {
     "id": "standard_user",
-    "password": "secret_sauce",
+    "password": {
+      "secret": "SAUCE_PASSWORD"
+    },
     "locked": "locked_out_user",
     "problem": "problem_user"
   },

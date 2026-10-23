@@ -1,0 +1,28 @@
+{
+  "id": "TC-A11Y-001",
+  "title": "로그인 화면 접근성 (WCAG 2.2 AA 자동 검사)",
+  "priority": "P2",
+  "automation": "적합",
+  "tags": [
+    "a11y"
+  ],
+  "reqIds": [
+    "A11Y-01"
+  ],
+  "platforms": [
+    "pc",
+    "mw"
+  ],
+  "precondition": "자동 검사는 WCAG 위반의 일부만 찾습니다. 키보드·스크린 리더 확인은 수동으로",
+  "manualMinutes": 15,
+  "steps": [
+    {
+      "action": "open",
+      "target": "screen.login"
+    },
+    {
+      "action": "assertA11y",
+      "value": "serious"
+    }
+  ]
+}

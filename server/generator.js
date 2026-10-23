@@ -1,10 +1,13 @@
-// TC JSON → 엔진별 스크립트 변환. PC 웹·MW는 Playwright, 안드로이드·아이폰은 Maestro YAML.
+// TC JSON → 엔진별 스크립트 변환. PC 웹·MW·API는 Playwright, 안드로이드·아이폰은 Maestro YAML.
+const path = require('path');
 const { ACTIONS, PLATFORM_LABELS } = require('./actions');
-const { expandSteps, resolveValue, stepTitle } = require('./tc');
+const { expandSteps, valueParts, resolveValue, rowsOf, stepTitle } = require('./tc');
 const { HttpError } = require('./store');
 
 const q = (s) => JSON.stringify(String(s));
 const PLATFORM = (p) => PLATFORM_LABELS[p] || p;
+// 생성된 스크립트가 불러오는 실행 도우미 (Windows 경로도 / 로)
+const RUNTIME = path.join(__dirname, 'runtime.js').split(path.sep).join('/');
 
 function webLocator(name, elements) {
   const el = elements.elements[name];
@@ -23,9 +26,41 @@ function webLocator(name, elements) {
 
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 
-function webActionCode(step, platform, ctx) {
+// 값 → JS 식. 비밀값은 실행 때 환경변수에서 읽고(rt.secret), 저장값은 앞 스텝의 응답에서 꺼낸 값(vars)
+// json: 요청 본문 JSON 문자열 안에 채울 값이라 이스케이프한다 (본문 자체의 글자는 그대로)
+function valueExpr(raw, ctx, row, { json = false } = {}) {
+  const exprs = valueParts(raw, ctx.testData, row).map((p) => {
+    if (p.lit !== undefined) return q(json && p.filled ? JSON.stringify(p.lit).slice(1, -1) : p.lit);
+    const e = p.secret ? `rt.secret(${q(p.secret)})` : `String(vars[${q(p.saved)}])`;
+    return json ? `JSON.stringify(${e}).slice(1, -1)` : e;
+  });
+  return exprs.length ? exprs.join(' + ') : '""';
+}
+
+const hasSecret = (raw, ctx, row) => raw !== undefined && valueParts(raw, ctx.testData, row).some((p) => p.secret);
+
+function apiRequestCode(step, ctx, row) {
+  const [, method, target] = String(step.value).match(/^(\w+)\s+(\S+)$/);
+  const m = method.toUpperCase();
+  const base = /^https?:\/\//i.test(target) ? '' : String(ctx.config.apiBaseURL || ctx.config.baseURL).replace(/\/+$/, '');
+  const urlExpr = `${base ? `${q(base)} + ` : ''}${valueExpr(target, ctx, row)}`;
+  const data = step.body ? `, data: JSON.parse(${valueExpr(step.body, ctx, row, { json: true })})` : '';
+  // 증적(첨부)에는 비밀값이 들어간 주소를 남기지 않는다. 본문은 항상 남기지 않는다
+  const shownUrl = hasSecret(target, ctx, row) ? q(target) : 'url';
+  return [
+    `const url = ${urlExpr};`,
+    `res = await http.fetch(url, { method: ${q(m)}, headers: { 'x-autotc-trace': trace }${data}, failOnStatusCode: false });`,
+    'const text = await res.text();',
+    'try { body = JSON.parse(text); } catch { body = text; }',
+    `await rt.attachJson(testInfo, ${q(`api-${step.no}`)}, { request: ${q(`${m} `)} + ${shownUrl}, trace, status: res.status(), body });`,
+  ];
+}
+
+const NEED_RES = "expect(res, '앞에 API 요청 스텝이 필요합니다').toBeTruthy();";
+
+function webActionCode(step, platform, ctx, row) {
   const L = () => webLocator(step.target, ctx.elements);
-  const v = () => q(resolveValue(step.value, ctx.testData));
+  const v = () => valueExpr(step.value, ctx, row);
   switch (step.action) {
     case 'open': {
       const screen = ctx.elements.screens[step.target];
@@ -44,28 +79,91 @@ function webActionCode(step, platform, ctx) {
     case 'assertText': return `await expect(${L()}).toHaveText(${v()});`;
     case 'assertVisible': return `await expect(${L()}).toBeVisible();`;
     case 'assertHidden': return `await expect(${L()}).toBeHidden();`;
-    case 'assertUrl': return `await expect(page).toHaveURL(/${escapeRegExp(resolveValue(step.value, ctx.testData))}/);`;
+    case 'assertUrl': return `await expect(page).toHaveURL(/${escapeRegExp(resolveValue(step.value, ctx.testData, { row }))}/);`;
+    case 'assertScreenshot': {
+      // 데이터 행마다 화면이 다를 수 있어 기준 이미지를 행별로 둔다
+      const name = `${step.value}${row ? `-${row.name.replace(/[^\w가-힣-]+/g, '_')}` : ''}.png`;
+      return `await expect(${step.target ? L() : 'page'}).toHaveScreenshot(${q(name)});`;
+    }
+    case 'assertA11y': return `await rt.checkA11y(page, testInfo, ${q(step.value || 'serious')});`;
+    case 'apiRequest': return apiRequestCode(step, ctx, row);
+    case 'assertStatus': {
+      const want = String(step.value);
+      return [NEED_RES, /x/i.test(want)
+        ? `expect(String(res.status()), '응답 코드').toMatch(/^${want[0]}\\d\\d$/);`
+        : `expect(res.status(), '응답 코드').toBe(${Number(want)});`];
+    }
+    case 'assertJson':
+      return [NEED_RES, `const [actual, expected] = rt.compareForm(rt.getPath(body, ${q(step.target)}), ${v()});`, `expect(actual, ${q(`응답 값 ${step.target}`)}).toEqual(expected);`];
+    case 'assertSchema': {
+      const schema = ctx.schemas && ctx.schemas[step.target];
+      if (!schema) throw new HttpError(400, `data/schemas에 없는 명세: ${step.target}`);
+      return [NEED_RES, `expect(rt.validateSchema(body, ${JSON.stringify(schema)}), ${q(`응답이 명세 ${step.target}와 다릅니다`)}).toEqual([]);`];
+    }
+    case 'saveValue':
+      return [NEED_RES, `vars[${q(step.value)}] = rt.getPath(body, ${q(step.target)});`, `expect(vars[${q(step.value)}], ${q(`응답에 ${step.target} 값이 없습니다`)}).not.toBeUndefined();`];
     default: throw new HttpError(400, `웹에서 변환할 수 없는 액션: ${step.action}`);
   }
 }
 
+// 실패 시 수리 후보를 모을 요소: 이 TC가 쓰는 웹 요소의 식별자
+function healTargets(steps, elements) {
+  const out = {};
+  for (const s of steps) {
+    if (ACTIONS[s.action].target !== 'element' || !s.target) continue;
+    const el = elements.elements[s.target];
+    if (el && el.web) out[s.target] = el.web;
+  }
+  return out;
+}
+
+const isApiAction = (action) => ACTIONS[action].support === ACTIONS.apiRequest.support;
+
 function genPlaywright(tc, platform, ctx) {
   const steps = expandSteps(tc, ctx.flows);
-  const lines = [
-    `// 자동 생성 파일입니다. 직접 수정하지 말고 data/tcs/${tc.id}.json 을 고치세요.`,
-    "import { test, expect } from '@playwright/test';",
-    '',
-    `test(${q(`${tc.id} ${tc.title}`)}, async ({ page }) => {`,
-  ];
   for (const s of steps) {
     if (ACTIONS[s.action].support[platform] === 'unsupported') {
       throw new HttpError(400, `${PLATFORM(platform)}에서 지원하지 않는 액션: ${s.action}`);
     }
-    lines.push(`  await test.step(${q(stepTitle(s))}, async () => {`);
-    lines.push(`    ${webActionCode(s, platform, ctx)}`);
-    lines.push('  });');
   }
-  lines.push('});', '');
+  const isApi = platform === 'api';
+  const usesApi = steps.some((s) => isApiAction(s.action));
+  const lines = [
+    `// 자동 생성 파일입니다. 직접 수정하지 말고 data/tcs/${tc.id}.json 을 고치세요.`,
+    "import { test, expect } from '@playwright/test';",
+    `import * as rt from ${q(RUNTIME)};`,
+    '',
+  ];
+  const heal = isApi ? {} : healTargets(steps, ctx.elements);
+  if (Object.keys(heal).length) {
+    lines.push(
+      '// 실패하면 요소 맵 식별자로 찾지 못한 요소와 화면의 대체 후보를 남긴다 (수리 제안용, 자동으로 고치지 않음)',
+      `const HEAL = ${JSON.stringify(heal)};`,
+      'test.afterEach(async ({ page }, testInfo) => {',
+      `  if (testInfo.status !== testInfo.expectedStatus) await rt.collectHealData(page, testInfo, HEAL, ${q(ctx.config.testIdAttribute || 'data-testid')});`,
+      '});',
+      '',
+    );
+  }
+  for (const row of rowsOf(tc)) {
+    const title = `${tc.id} ${tc.title}${row ? ` [${row.name}]` : ''}`;
+    lines.push(`test(${q(title)}, async ({ ${isApi ? 'request' : 'page'} }, testInfo) => {`);
+    if (usesApi) {
+      lines.push(
+        `  const http = ${isApi ? 'request' : 'page.request'};`,
+        `  const trace = \`\${process.env.AUTOTC_RUN_ID || 'local'}.${tc.id}.\${testInfo.project.name}\`;`,
+        '  const vars = {};',
+        '  let res;',
+        '  let body;',
+      );
+    }
+    for (const s of steps) {
+      lines.push(`  await test.step(${q(stepTitle(s))}, async () => {`);
+      [].concat(webActionCode(s, platform, ctx, row)).forEach((c) => lines.push(`    ${c}`));
+      lines.push('  });');
+    }
+    lines.push('});', '');
+  }
   return lines.join('\n');
 }
 
@@ -83,7 +181,7 @@ function mobileSelector(name, platform, elements) {
 // 실행 결과의 명령별 상태를 스텝으로 되돌려 매핑한다.
 // kind: action(조작) / presence(요소 노출 확인) / value(값 확인) / meta(스텝과 무관)
 // strict: 실행용. 식별자 없는 요소나 지원하지 않는 액션이 있으면 오류를 던진다
-function buildMaestro(tc, platform, ctx, { strict = false } = {}) {
+function buildMaestro(tc, platform, ctx, { strict = false, row = null } = {}) {
   const steps = expandSteps(tc, ctx.flows);
   const entries = [];
   const missing = new Set();
@@ -105,7 +203,8 @@ function buildMaestro(tc, platform, ctx, { strict = false } = {}) {
       note(`${s.no}. ${s.action}: ${PLATFORM(platform)}에서 지원하지 않는 액션 (이 TC는 Skipped 처리)`);
       continue;
     }
-    const val = s.value !== undefined ? resolveValue(s.value, ctx.testData) : undefined;
+    // 비밀값은 Maestro가 실행 때 MAESTRO_ 환경변수에서 채운다 (YAML 파일에는 이름만 남음)
+    const val = s.value !== undefined ? resolveValue(s.value, ctx.testData, { row, secret: (n) => `\${MAESTRO_AUTOTC_SECRET_${n}}` }) : undefined;
     note(`${s.no}. ${s.action}${s.target ? ` ${s.target}` : ''}`);
     switch (s.action) {
       case 'open': {
@@ -186,18 +285,19 @@ function renderMaestro(tc, built) {
   return out.join('\n') + '\n';
 }
 
-function genMaestro(tc, platform, ctx, opts) {
-  return renderMaestro(tc, buildMaestro(tc, platform, ctx, opts));
+// 미리보기는 데이터 행이 있으면 첫 행으로 만든다
+function genMaestro(tc, platform, ctx, opts = {}) {
+  return renderMaestro(tc, buildMaestro(tc, platform, ctx, { row: rowsOf(tc)[0], ...opts }));
 }
 
-// 실행용: YAML과 명령 목록(스텝 매핑용)을 함께 돌려준다
-function maestroForRun(tc, platform, ctx) {
-  const built = buildMaestro(tc, platform, ctx, { strict: true });
+// 실행용: YAML과 명령 목록(스텝 매핑용)을 함께 돌려준다. row: 데이터 행
+function maestroForRun(tc, platform, ctx, row = null) {
+  const built = buildMaestro(tc, platform, ctx, { strict: true, row });
   return { code: renderMaestro(tc, built), commands: built.entries.filter((e) => e.type === 'cmd'), steps: built.steps, appId: built.appId };
 }
 
 function generate(tc, platform, ctx) {
-  if (platform === 'pc' || platform === 'mw') return { language: 'typescript', code: genPlaywright(tc, platform, ctx) };
+  if (platform === 'pc' || platform === 'mw' || platform === 'api') return { language: 'typescript', code: genPlaywright(tc, platform, ctx) };
   return { language: 'yaml', code: genMaestro(tc, platform, ctx) };
 }
 

@@ -30,6 +30,26 @@ function validate(input, current) {
   else c.baseURL = s(input.baseURL).replace(/\/+$/, '');
   if (!/^[a-zA-Z][\w-]*$/.test(s(input.testIdAttribute))) e.push('식별자 속성은 영문·숫자·-·_ 만 쓸 수 있습니다 (예: data-testid)');
   else c.testIdAttribute = s(input.testIdAttribute);
+  // API 주소는 비우면 대상 사이트 주소를 쓴다
+  if (s(input.apiBaseURL) && !isUrl(s(input.apiBaseURL))) e.push('API 주소는 http:// 또는 https://로 시작해야 합니다');
+  else if (s(input.apiBaseURL)) c.apiBaseURL = s(input.apiBaseURL).replace(/\/+$/, '');
+  else delete c.apiBaseURL;
+
+  const vis = input.visual || {};
+  const ratio = Number(vis.maxDiffPixelRatio === undefined ? 0.002 : vis.maxDiffPixelRatio);
+  if (!(ratio >= 0 && ratio <= 0.5)) e.push('화면 비교 허용 차이는 0~50%입니다');
+  c.visual = { ...c.visual, maxDiffPixelRatio: ratio };
+
+  const roi = input.roi || {};
+  const roiKeys = { manualMinutesDefault: [0, 1440], setupHours: [0, 10000], authorMinutesPerTc: [0, 1440], fixMinutesPerIssue: [0, 1440], analysisMinutesPerFailure: [0, 1440] };
+  const roiOut = {};
+  for (const [k, [min, max]] of Object.entries(roiKeys)) {
+    if (roi[k] === undefined || roi[k] === '') continue;
+    const v = Number(roi[k]);
+    if (!(v >= min && v <= max)) e.push(`ROI 설정 ${k}는 ${min}~${max} 사이 숫자여야 합니다`);
+    else roiOut[k] = v;
+  }
+  c.roi = { ...c.roi, ...roiOut };
 
   const pc = input.pc || {};
   if (!devices[pc.device] || devices[pc.device].isMobile) e.push(`PC 기기 프리셋이 올바르지 않습니다: ${pc.device}`);

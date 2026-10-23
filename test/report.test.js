@@ -44,6 +44,7 @@ test('junitXml: 프로젝트별 testsuite, Fail은 failure, Blocked는 skipped, 
 test('parseArgs: 목록 옵션과 잘못된 옵션', () => {
   assert.deepStrictEqual(parseArgs(['--platforms', 'pc, mw', '--tags', 'smoke', '--exclude-tags', 'demo-bug', '--no-gate']),
     { platforms: ['pc', 'mw'], tags: ['smoke'], excludeTags: ['demo-bug'], gate: false });
+  assert.deepStrictEqual(parseArgs(['--update-baselines']), { platforms: ['pc', 'mw', 'api'], gate: true, updateBaselines: true });
   assert.throws(() => parseArgs(['--tags']), /--tags 옵션에 값이 필요합니다/);
   assert.throws(() => parseArgs(['--bogus']), /알 수 없는 옵션/);
 });

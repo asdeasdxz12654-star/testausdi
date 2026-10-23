@@ -1,0 +1,58 @@
+{
+  "id": "TC-API-002",
+  "title": "게시글 등록 후 응답 값 확인",
+  "priority": "P2",
+  "automation": "적합",
+  "tags": [
+    "regression",
+    "api"
+  ],
+  "reqIds": [
+    "API-POST-02"
+  ],
+  "platforms": [
+    "api"
+  ],
+  "precondition": "jsonplaceholder는 등록을 흉내만 내고 저장하지 않음",
+  "manualMinutes": 4,
+  "steps": [
+    {
+      "action": "apiRequest",
+      "value": "POST /posts",
+      "body": "{\"title\": \"{{row.title}}\", \"body\": \"AutoTC\", \"userId\": 1}"
+    },
+    {
+      "action": "assertStatus",
+      "value": "201"
+    },
+    {
+      "action": "assertJson",
+      "target": "title",
+      "value": "{{row.title}}"
+    },
+    {
+      "action": "saveValue",
+      "target": "id",
+      "value": "newId"
+    },
+    {
+      "action": "assertJson",
+      "target": "id",
+      "value": "{{saved.newId}}"
+    }
+  ],
+  "dataSets": [
+    {
+      "name": "한글 제목",
+      "values": {
+        "title": "자동화 테스트 게시글"
+      }
+    },
+    {
+      "name": "특수문자",
+      "values": {
+        "title": "Quote \" & <tag>"
+      }
+    }
+  ]
+}

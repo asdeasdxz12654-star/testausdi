@@ -7,12 +7,14 @@ const P = require('./paths');
 const store = require('./store');
 const { HttpError } = store;
 const { PLATFORMS, PLATFORM_LABELS } = require('./actions');
-const { expandSteps, supportOn } = require('./tc');
+const { expandSteps, supportOn, secretsUsed, rowsOf } = require('./tc');
 const { genPlaywright, maestroForRun } = require('./generator');
 const { precheck } = require('./precheck');
 const android = require('./android');
 const classify = require('./classify');
 const issuesLib = require('./issues');
+const secrets = require('./secrets');
+const heal = require('./heal');
 
 const CLI = require.resolve('@playwright/test/cli');
 const LOG_LIMIT = 400;
@@ -36,6 +38,15 @@ function projectsFor(platform, config) {
   return [{ name: platform, platform, device: null }];
 }
 
+const apiBase = (config) => config.apiBaseURL || config.baseURL;
+
+// 화면 비교 스텝이 쓰는 기준 이미지 경로 (playwright 설정의 snapshotPathTemplate과 같은 규칙)
+function baselineFiles(tc, steps, projectName) {
+  const names = steps.filter((s) => s.action === 'assertScreenshot')
+    .flatMap((s) => rowsOf(tc).map((row) => `${s.value}${row ? `-${row.name.replace(/[^\w가-힣-]+/g, '_')}` : ''}.png`));
+  return names.map((n) => path.join(P.DATA, 'baselines', process.platform, projectName, `${tc.id}.spec.ts`, n));
+}
+
 function androidLabel(device) {
   if (!device) return PLATFORM_LABELS.android;
   return `${device.model} · Android ${device.androidVersion}${device.appVersion ? ` · 앱 ${device.appVersion}${device.appVersionCode ? ` (${device.appVersionCode})` : ''}` : ''}`;
@@ -50,6 +61,7 @@ function deviceLabel(project, config) {
     const d = devices[project.device];
     return d ? `${project.device} 에뮬레이션 ${d.viewport.width}×${d.viewport.height}` : project.device;
   }
+  if (project.platform === 'api') return apiBase(config);
   return PLATFORM_LABELS[project.platform];
 }
 
@@ -79,6 +91,7 @@ function startRun(options = {}, deps = {}) {
     finishedAt: null,
     platforms,
     tcIds: tcs.map((t) => t.id),
+    updateBaselines: !!options.updateBaselines,
     precheck: [],
     results: [],
     log: [],
@@ -107,13 +120,17 @@ function pushLog(run, text) {
   if (run.log.length > LOG_LIMIT) run.log.splice(0, run.log.length - LOG_LIMIT);
 }
 
+// 실행 폴더의 파일은 /files/, 화면 비교 기준 이미지(data/baselines)는 /baselines/ 로 연다
 function fileUrl(abs) {
+  const baseDir = path.join(P.DATA, 'baselines');
+  if (abs.startsWith(baseDir + path.sep)) return `/baselines/${path.relative(baseDir, abs).split(path.sep).map(encodeURIComponent).join('/')}`;
   return `/files/${path.relative(P.RUNS, abs).split(path.sep).map(encodeURIComponent).join('/')}`;
 }
 
 async function execute(run, tcs, tools) {
   const config = store.getConfig();
-  const ctx = { config, elements: store.getElements(), flows: store.getFlows(), testData: store.getTestData() };
+  const ctx = { config, elements: store.getElements(), flows: store.getFlows(), testData: store.getTestData(), schemas: store.getSchemas() };
+  const secretNames = new Set();
   const runDir = path.join(P.RUNS, run.id);
   const genDir = path.join(P.GENERATED, run.id);
 
@@ -125,6 +142,12 @@ async function execute(run, tcs, tools) {
   const usedProjects = new Map();
   for (const tc of tcs) {
     const steps = expandSteps(tc, ctx.flows);
+    let missingSecrets = [];
+    try {
+      const used = secretsUsed(tc, ctx.flows, ctx.testData);
+      used.forEach((n) => secretNames.add(n));
+      missingSecrets = secrets.missing(used);
+    } catch { /* 테스트 데이터 오류는 아래 스크립트 변환에서 사유로 남는다 */ }
     for (const platform of run.platforms.filter((p) => tc.platforms.includes(p))) {
       for (const project of projectsFor(platform, config)) {
         const r = {
@@ -148,12 +171,20 @@ async function execute(run, tcs, tools) {
           r.reason = `${PLATFORM_LABELS[platform]}에서 지원하지 않는 액션: ${support.unsupported.join(', ')}`;
           continue;
         }
+        if (missingSecrets.length) {
+          r.status = 'Blocked';
+          r.reason = `비밀값이 없습니다: ${missingSecrets.join(', ')} (설정 → 비밀값에서 저장하거나 같은 이름의 환경변수로 넣으세요)`;
+          continue;
+        }
+        if (steps.some((s) => s.action === 'apiRequest')) r.trace = `${run.id}.${tc.id}.${project.name}`;
         if (platform === 'android') {
           try {
-            r.androidFlow = maestroForRun(tc, platform, ctx);
-            const file = path.join(genDir, 'android', `${tc.id}.yaml`);
-            fs.mkdirSync(path.dirname(file), { recursive: true });
-            fs.writeFileSync(file, r.androidFlow.code, 'utf8');
+            r.androidFlows = rowsOf(tc).map((row) => ({ row, flow: maestroForRun(tc, platform, ctx, row) }));
+            r.androidFlows.forEach(({ row, flow }) => {
+              const file = path.join(genDir, 'android', `${tc.id}${row ? `-${slug(row.name) || 'row'}` : ''}.yaml`);
+              fs.mkdirSync(path.dirname(file), { recursive: true });
+              fs.writeFileSync(file, flow.code, 'utf8');
+            });
           } catch (e) {
             r.status = 'Blocked';
             r.reason = `스크립트 변환 실패: ${e.message}`;
@@ -167,6 +198,9 @@ async function execute(run, tcs, tools) {
           fs.writeFileSync(file, code, 'utf8');
           usedProjects.set(project.name, project);
           r.pending = true;
+          // 화면 비교 기준 이미지가 아직 없는 것: 이번 실행 화면이 기준으로 저장되므로 사람이 확인해야 한다
+          const missingBase = baselineFiles(tc, steps, project.name).filter((f) => !fs.existsSync(f));
+          if (missingBase.length) r.baselinesMissing = missingBase;
         } catch (e) {
           r.status = 'Blocked';
           r.reason = `스크립트 변환 실패: ${e.message}`;
@@ -180,11 +214,15 @@ async function execute(run, tcs, tools) {
     run.phase = `실행 중 (${pending.length}건)`;
     const reportFile = path.join(runDir, 'playwright-results.json');
     const cfgFile = path.join(genDir, 'playwright.config.js');
+    const visual = { maxDiffPixelRatio: 0.002, ...(config.visual || {}) };
     const pwConfig = {
       testDir: genDir,
       outputDir: path.join(runDir, 'artifacts'),
       timeout: config.run.timeoutMs,
-      expect: { timeout: config.run.expectTimeoutMs },
+      expect: { timeout: config.run.expectTimeoutMs, toHaveScreenshot: { maxDiffPixelRatio: visual.maxDiffPixelRatio, animations: 'disabled' } },
+      // 기준 이미지는 Git으로 관리한다. OS마다 글꼴 렌더링이 달라 OS별로 따로 둔다
+      snapshotPathTemplate: `${path.join(P.DATA, 'baselines').split(path.sep).join('/')}/{platform}/{projectName}/{testFileName}/{arg}{ext}`,
+      updateSnapshots: run.updateBaselines ? 'changed' : 'missing',
       retries: config.run.retries,
       workers: config.run.workers,
       fullyParallel: true,
@@ -207,23 +245,45 @@ async function execute(run, tcs, tools) {
     };
     fs.mkdirSync(genDir, { recursive: true });
     fs.writeFileSync(cfgFile, `// 자동 생성 파일 (${run.id})\nmodule.exports = ${JSON.stringify(pwConfig, null, 2)};\n`, 'utf8');
-    await runPlaywright(run, cfgFile);
+    await runPlaywright(run, cfgFile, { AUTOTC_RUN_ID: run.id, ...secrets.envFor([...secretNames]) });
     run.phase = '판정';
     const report = store.readJson(reportFile, { tests: [] });
     for (const r of pending) {
       delete r.pending;
-      const t = report.tests.find((x) => x.project === r.project && x.title.startsWith(`${r.tcId} `));
-      if (!t) {
+      // 데이터 행이 있으면 행마다 테스트가 하나씩 있다 ("TC-ID 제목 [행 이름]")
+      const ts = report.tests.filter((x) => x.project === r.project && x.title.startsWith(`${r.tcId} `));
+      if (!ts.length) {
         r.status = 'Blocked';
         r.reason = 'Playwright 실행 결과가 없습니다. 실행 로그를 확인하세요';
         continue;
       }
-      applyAttempts(r, t);
+      applyAttempts(r, combineRows(ts));
     }
   }
 
-  const androidPending = run.results.filter((r) => r.androidFlow);
-  if (androidPending.length) await runAndroid(run, androidPending, pre.android.device, config, tools);
+  const androidPending = run.results.filter((r) => r.androidFlows);
+  if (androidPending.length) await runAndroid(run, androidPending, pre.android.device, config, tools, secretNames);
+
+  for (const r of run.results) {
+    if (r.baselinesMissing) {
+      const created = r.baselinesMissing.filter((f) => fs.existsSync(f));
+      if (created.length) {
+        r.baselineCreated = created.map((f) => path.relative(P.DATA, f).split(path.sep).join('/'));
+        if (r.status === 'Pass') r.reason = `기준 이미지가 없어 이번 실행 화면을 기준으로 저장했습니다 (${r.baselineCreated.join(', ')}). 화면이 맞는지 확인하고, 맞으면 Git에 커밋하세요`;
+      }
+      delete r.baselinesMissing;
+    }
+    // 기준 이미지가 없던 화면 비교: 이번 화면을 기준으로 저장했으니 사람이 확인해야 한다 (결함 아님)
+    if (r.status === 'Fail' && r.errorType === 'BASELINE_MISSING') {
+      r.status = 'Blocked';
+      r.reason = '기준 이미지가 없어 이번 실행 화면을 기준으로 저장했습니다 (data/baselines). 저장된 이미지를 확인한 뒤 다시 실행하세요';
+    }
+    // 요소를 못 찾은 웹 실패: 실패 시점 화면에서 수리 후보를 계산한다 (반영은 사람이)
+    if (r.healFile) {
+      if (r.errorType === 'ELEMENT_NOT_FOUND') r.heal = heal.suggest(store.readJson(r.healFile, null), ctx.elements, r.failedStep && r.failedStep.target);
+      delete r.healFile;
+    }
+  }
 
   // 같은 TC의 다른 플랫폼 결과와 비교해 분류
   const tcsById = Object.fromEntries(tcs.map((t) => [t.id, t]));
@@ -250,7 +310,8 @@ async function execute(run, tcs, tools) {
 }
 
 // 안드로이드는 기기 한 대에서 TC를 하나씩 실행한다. APK가 지정돼 있으면 먼저 설치한다
-async function runAndroid(run, pending, device, config, tools) {
+async function runAndroid(run, pending, device, config, tools, secretNames = new Set()) {
+  const env = secrets.envFor([...secretNames]);
   const conf = config.android || {};
   const runDir = path.join(P.RUNS, run.id);
   if (conf.apkPath) {
@@ -263,29 +324,47 @@ async function runAndroid(run, pending, device, config, tools) {
       pending.forEach((r) => { r.device = androidLabel(device); });
     } catch (e) {
       pushLog(run, `[안드로이드] ${e.message}`);
-      pending.forEach((r) => { delete r.androidFlow; r.status = 'Blocked'; r.reason = e.message; });
+      pending.forEach((r) => { delete r.androidFlows; r.status = 'Blocked'; r.reason = e.message; });
       return;
     }
   }
   for (const [i, r] of pending.entries()) {
     run.phase = `안드로이드 실행 (${i + 1}/${pending.length})`;
-    const flow = r.androidFlow;
-    delete r.androidFlow;
-    const t = await android.runTc({
-      tc: { id: r.tcId, title: r.title }, flow, serial: device.serial,
-      retries: config.run.retries, timeoutMs: config.run.mobileTimeoutMs || 300000,
-      outDir: path.join(runDir, 'artifacts', `${r.tcId}-android`), tools, log: (m) => pushLog(run, m),
-    });
-    applyAttempts(r, t);
+    const flows = r.androidFlows;
+    delete r.androidFlows;
+    const tests = [];
+    for (const { row, flow } of flows) {
+      tests.push(await android.runTc({
+        tc: { id: r.tcId, title: `${r.title}${row ? ` [${row.name}]` : ''}` }, flow, serial: device.serial,
+        retries: config.run.retries, timeoutMs: config.run.mobileTimeoutMs || 300000, env,
+        outDir: path.join(runDir, 'artifacts', `${r.tcId}-android${row ? `-${slug(row.name) || 'row'}` : ''}`), tools, log: (m) => pushLog(run, m),
+      }));
+    }
+    applyAttempts(r, combineRows(tests));
   }
 }
 
-function runPlaywright(run, cfgFile) {
+const OUTCOME_RANK = { unexpected: 3, flaky: 2, expected: 1, skipped: 0 };
+const rowName = (t) => (t.title.match(/\[([^\]]+)\]$/) || [])[1] || null;
+
+// 데이터 행별 결과를 TC 하나의 결과로 합친다. 판정과 증적은 가장 나쁜 행 기준, 시간은 합계
+function combineRows(tests) {
+  if (tests.length === 1) return tests[0];
+  const worst = tests.reduce((a, b) => (OUTCOME_RANK[b.outcome] > OUTCOME_RANK[a.outcome] ? b : a));
+  return {
+    ...worst,
+    rows: tests.map((t) => ({ name: rowName(t), status: OUTCOME[t.outcome] || 'Fail', durationMs: t.attempts.reduce((s, a) => s + a.duration, 0) })),
+    failedRow: worst.outcome === 'expected' ? null : rowName(worst),
+    totalMs: tests.reduce((s, t) => s + t.attempts.reduce((x, a) => x + a.duration, 0), 0),
+  };
+}
+
+function runPlaywright(run, cfgFile, extraEnv = {}) {
   return new Promise((resolve) => {
     pushLog(run, '[실행] Playwright 시작');
     const child = spawn(process.execPath, [CLI, 'test', '--config', cfgFile], {
       cwd: P.ROOT,
-      env: { ...process.env, FORCE_COLOR: '0', PW_TEST_HTML_REPORT_OPEN: 'never' },
+      env: { ...process.env, ...extraEnv, FORCE_COLOR: '0', PW_TEST_HTML_REPORT_OPEN: 'never' },
       windowsHide: true,
     });
     child.stdout.on('data', (d) => pushLog(run, d));
@@ -300,10 +379,14 @@ const OUTCOME = { expected: 'Pass', flaky: 'Flaky', unexpected: 'Fail', skipped:
 function applyAttempts(r, t) {
   r.status = OUTCOME[t.outcome] || 'Fail';
   r.attempts = t.attempts.map((a) => ({ retry: a.retry, status: a.status, durationMs: a.duration, error: a.error, steps: a.steps }));
-  r.durationMs = t.attempts.reduce((s, a) => s + a.duration, 0);
+  r.durationMs = t.totalMs || t.attempts.reduce((s, a) => s + a.duration, 0);
+  if (t.rows) { r.rows = t.rows; r.failedRow = t.failedRow; }
   // Fail은 마지막 시도, Flaky는 처음 실패한 시도를 근거로 삼는다
   const basis = r.status === 'Flaky' ? t.attempts.find((a) => a.status !== 'passed') : t.attempts[t.attempts.length - 1];
-  r.attachments = (basis ? basis.attachments : []).map((a) => ({ name: a.name, contentType: a.contentType, url: fileUrl(a.path) }));
+  const files = basis ? basis.attachments : [];
+  const healAtt = files.find((a) => a.name === 'autotc-heal');
+  if (healAtt) r.healFile = healAtt.path;
+  r.attachments = files.filter((a) => a !== healAtt).map((a) => ({ name: a.name, contentType: a.contentType, url: fileUrl(a.path) }));
   if (r.status === 'Fail' || r.status === 'Flaky') {
     r.failedStep = classify.failedStep(basis);
     r.error = basis.error;
@@ -345,6 +428,7 @@ function summarize(run, issues, config) {
   ];
   return {
     counts, byPlatform, classifications, executed, quarantined,
+    newBaselines: run.results.filter((r) => r.baselineCreated).length,
     passRate: executed ? passCount / executed : null,
     exit, releasable: exit.every((e) => e.ok),
   };

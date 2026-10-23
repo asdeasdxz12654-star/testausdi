@@ -88,27 +88,50 @@ AI가 지어낸 답을 걸러내는 규칙:
 
 모델과 생각 깊이는 `data/config.json`의 `ai`(기본 `claude-opus-5-5`, `high`)에서 바꿉니다.
 
+## 실무 기능 (ISTQB · 업계 사례 반영)
+
+2025~2026년 업계 조사와 국내 기업 사례에서 공통으로 쓰는 방식과 ISTQB CTAL-TAE·CT-TAS 권장 사항을 반영한 기능입니다.
+
+| 기능 | 쓰는 법 | 근거 |
+|---|---|---|
+| **API 테스트** | 플랫폼 **API**를 고르고 `API 요청`(예: `GET /posts/1`, 본문 JSON 선택) → `응답 코드 확인`(`200`, `2xx`) · `응답 값 확인`(경로 `data.items[0].id`, 기대값, `*`는 값이 있기만 하면 통과) · `응답 형식 확인`(스키마) · `응답 값 저장`(다음 스텝에서 `{{saved.이름}}`). 웹 TC 안에서도 써서 화면 사전 조건(계정·데이터 준비)을 API로 만들 수 있습니다 (브라우저와 쿠키 공유) | TAE 5.1.3·8.1.1, TAS 3.1 (UI에만 의존하는 "우산형" 분포 개선) |
+| **응답 형식(스키마)** | `data/schemas/<이름>.json`에 JSON Schema(type, required, properties, items, enum, 범위·길이·패턴, additionalProperties: false)를 두고 `응답 형식 확인` 스텝에서 이름을 고릅니다 | TAE 8.1.1 |
+| **비밀값** | `data/testdata.json`에는 `{"secret": "SAUCE_PASSWORD"}`처럼 이름만 둡니다. 값은 **설정 → 비밀값**(이 PC의 `data/state/secrets.json`, Git 제외) 또는 같은 이름의 환경변수(CI는 GitHub Secrets)로 넣습니다. 생성된 스크립트·YAML·리포트·결함 초안에는 값이 남지 않고, 없으면 그 TC는 Blocked입니다 | TAE 7.1.4 (평문 비밀번호) |
+| **비밀값 평문 검사** | `npm run scan:secrets` (CI 단위 테스트 단계에서도 실행). Claude·GitHub·AWS·Slack·피그마 키 형식과, `data/` JSON에서 password·token·secret 이름의 평문 값을 찾습니다. 꼭 필요한 예외 줄에는 `secret-scan:allow` | TAE 7.1.4 |
+| **데이터 주도 (데이터 행)** | TC 편집의 **데이터 행**에 표를 붙여넣고(첫 줄 머리글, 첫 칸 행 이름, 엑셀 복사 가능) 스텝 값에 `{{row.키}}`. 행마다 한 번씩 실행하고, 결과는 TC 하나로 합쳐 실패한 행을 보여줍니다 | TAE 3.1.4 |
+| **화면 비교 (시각적 회귀)** | `화면 비교` 스텝(화면 전체 또는 요소, 기준 이미지 이름). 기준 이미지가 없으면 이번 화면을 기준으로 저장하고 "확인 필요"로 알립니다. 기준은 `data/baselines/<OS>/<실행 단위>/`에 저장되어 Git으로 관리합니다. 허용 차이는 설정(기본 0.2%). 의도한 디자인 변경은 실행 화면의 "기준 이미지 갱신"(CI: `--update-baselines`)으로 반영합니다 | 우아한형제들 디자인 시스템 사례 |
+| **접근성 검사** | `접근성 검사` 스텝(axe-core, WCAG 2.2 AA 규칙). 값은 실패로 볼 최소 수준(기본 serious). 위반 목록·설명 링크를 결과 화면에 보여줍니다. 자동 검사는 WCAG 위반의 일부만 찾으므로 키보드·스크린 리더 확인은 수동으로 합니다 | EU 접근성법(2025-06 시행), KWCAG |
+| **요소 수리 제안** | 웹 TC가 요소를 못 찾아 실패하면, 실패 시점 화면에서 식별자가 비슷한 요소를 찾아 결과 화면에 제안합니다(줄임말·이름 변경, 유사도 75% 이상만). **자동으로 고치지 않고** QA가 "요소 맵에 반영"을 눌러야 바뀌며, 이전 식별자는 요소에 기록됩니다. 기대 요소를 다른 요소로 바꿔 통과시키면 결함을 숨길 수 있기 때문입니다 | TAE 8.1.1, CT-GenAI 2.2.3 (셀프힐링), Playwright Healer |
+| **추적 ID** | API 요청마다 `x-autotc-trace: <실행ID>.<TC>.<실행 단위>` 헤더를 보내고 결과·결함 초안에 남깁니다. 개발팀이 서버 로그에서 바로 찾을 수 있습니다 | TAE 6.1.2 |
+| **품질 지표** | 실행 추세, TC별 최근 20회 판정(테스트 히스토그램), ROI(절감 ÷ 투자, 회수까지 남은 실행 수), 자동화 비율·요구사항 커버리지, 실패 대 결함 비율, UI·API 분포 모양. TC마다 **수동 실행 시간(분)** 을 넣으면 ROI가 정확해집니다. 계산 기준은 설정 → ROI 계산 기준 | TAS 5.1·5.2, TAE 8.1.1 |
+
+예시 TC: `TC-API-001~003`(공개 연습 API jsonplaceholder, 스키마·등록·404, 데이터 행), `TC-LOGIN-005`(로그인 입력 검증 3행), `TC-VISUAL-001`(로그인 화면 비교), `TC-A11Y-001`(로그인 화면 접근성).
+
+**처음 실행할 때**: 로그인 TC는 비밀값 `SAUCE_PASSWORD`가 필요합니다. 설정 → 비밀값에서 `SAUCE_PASSWORD`에 saucedemo 로그인 화면에 공개된 비밀번호를 넣으세요. CI에서는 저장소 Settings → Secrets and variables → Actions에 같은 이름으로 넣습니다.
+
 ## CI (GitHub Actions)
 
 `.github/workflows/autotc.yml`이 GitHub에 올라가면 자동으로 동작합니다.
 
 | 언제 | 무엇을 |
 |---|---|
-| `main` 푸시, PR | 단위 테스트 → `@smoke` TC를 PC 웹·MW에서 실행 |
+| `main` 푸시, PR | 단위 테스트 · 비밀값 평문 검사 → `@smoke` TC를 PC 웹·MW·API에서 실행 |
 | 매일 03:00 (KST) | `@regression` TC 실행 (야간 회귀) |
 | Actions 탭에서 수동 실행 | 태그·플랫폼을 지정해 실행 |
 
 - 종료 기준(`data/config.json`의 `exitCriteria`)을 못 맞추면 워크플로가 실패로 표시됩니다.
 - 실행 요약이 Actions 실행 화면에 표로 나오고, `summary.md`, `junit.xml`, 스크린샷·영상·트레이스, Playwright HTML 리포트를 아티팩트로 14일간 보관합니다.
-- 결함을 일부러 심은 예시 TC(`demo-bug` 태그)는 CI에서 제외합니다.
+- 결함을 일부러 심은 예시 TC(`demo-bug` 태그)와 화면 비교 TC(`visual` 태그, 리눅스 기준 이미지가 아직 없음)는 CI에서 제외합니다. 리눅스 기준 이미지를 `--update-baselines`로 만들어 커밋하면 `visual`도 켤 수 있습니다.
+- 로그인 TC는 저장소 Secrets의 `SAUCE_PASSWORD`가 있어야 실행됩니다 (없으면 Blocked → 종료 기준 미충족).
 - 슬랙 알림: 저장소 Settings → Secrets에 `AUTOTC_SLACK_WEBHOOK`(수신 웹훅 URL)을 넣으면 실행마다 결과를 보냅니다.
 - CI의 이슈·이력은 실행마다 새로 시작합니다. 이슈를 이어서 관리하는 것은 로컬 콘솔에서 합니다.
 
 명령줄 옵션:
 
 ```
-npm run ci -- --platforms pc,mw --tags smoke --exclude-tags demo-bug --label "스모크" --out report
+npm run ci -- --platforms pc,mw,api --tags smoke --exclude-tags demo-bug --label "스모크" --out report
   --tc TC-LOGIN-001,TC-CART-001   지정한 TC만
+  --update-baselines              화면 비교 기준 이미지를 이번 화면으로 갱신
   --no-gate                       종료 기준을 못 맞춰도 성공 처리 (리포트만 필요할 때)
 종료 코드: 0 충족 · 1 미충족 · 2 실행 오류
 ```
@@ -117,14 +140,15 @@ npm run ci -- --platforms pc,mw --tags smoke --exclude-tags demo-bug --label "�
 
 | 화면 | 하는 일 |
 |---|---|
-| 실행 현황 | 플랫폼·스위트를 골라 실행, 종료 기준 충족 여부, 플랫폼별 결과, 실패 목록, 실패만 재실행 |
-| 결과 상세 | 스텝별 통과/실패, 오류, 실패 시점 스크린샷·영상·트레이스, 실패 분류 확정, 결함 초안 복사 |
-| TC 편집 | 표 형식으로 TC 작성, 플랫폼별 지원 여부 표시, 엔진별 코드(Playwright / Maestro) 미리보기, 엑셀·스프레드시트·CSV 가져오기 |
+| 실행 현황 | 플랫폼·스위트를 골라 실행, 기준 이미지 갱신, 종료 기준 충족 여부, 플랫폼별 결과, 실패 목록, 실패만 재실행 |
+| 결과 상세 | 스텝별 통과/실패, 오류, 실패 시점 스크린샷·영상·트레이스, 데이터 행별 결과, 화면 비교(기준·이번·차이), 접근성 위반, API 응답, 추적 ID, 요소 수리 제안, 실패 분류 확정, 결함 초안 복사 |
+| TC 편집 | 표 형식으로 TC 작성, 플랫폼별 지원 여부 표시, 데이터 행, 수동 실행 시간, 엔진별 코드(Playwright / Maestro) 미리보기, 엑셀·스프레드시트·CSV 가져오기 |
+| 품질 지표 | 실행 추세, TC별 판정 이력, ROI, 커버리지, 실패 대 결함, 테스트 분포 |
 | 요소 맵 | 논리 이름(`login.submit`) ↔ 플랫폼별 식별자 관리, 개발팀 식별자 요청문 생성 |
 | 기기 관리 | 플랫폼별 사전 점검 결과와 준비 방법 |
 | 영역 매핑 | 기획서·디자인으로 TC의 화면·영역·근거 찾기, 확신도·TC 없는 영역 검토, 승인 결과 반영 |
 | 이슈 관리 | 실패 시그니처로 묶인 이슈, 유형·심각도·상태·이슈 트래커 ID 관리, 재검증 실행 |
-| 설정 | 대상 사이트 주소·접속 확인(식별자 속성 찾기), 프로젝트 이름, PC·MW 기기, 앱 정보, 재시도·제한 시간, 종료 기준·격리 기준, AI 모델·API 키 |
+| 설정 | 대상 사이트·API 주소, 접속 확인(식별자 속성 찾기), 화면 비교 허용 차이, 비밀값, PC·MW 기기, 앱 정보, 재시도·제한 시간, 종료 기준·격리 기준, ROI 계산 기준, AI 모델·API 키 |
 
 ## 데이터
 
@@ -133,9 +157,11 @@ npm run ci -- --platforms pc,mw --tags smoke --exclude-tags demo-bug --label "�
 | `data/tcs/*.json` | TC 1건당 파일 1개 | 관리 |
 | `data/elements.json` | 화면·요소 맵 | 관리 |
 | `data/flows.json` | 공통 흐름 (예: 로그인) | 관리 |
-| `data/testdata.json` | 계정·입력값. TC에서 `{{account.id}}`로 참조 | 관리 (실제 계정은 넣지 마세요) |
-| `data/config.json` | 대상 URL, 기기 프리셋, 앱 정보, 재시도·타임아웃, 종료 기준, 격리 기준, AI 모델. **설정** 화면에서 바꿉니다 | 관리 |
-| `data/state/` | 실행 결과·증적, 이슈, 판정 이력 | 제외 |
+| `data/testdata.json` | 계정·입력값. TC에서 `{{account.id}}`로 참조. 비밀번호는 `{"secret": "이름"}` | 관리 (평문 비밀번호 금지, `npm run scan:secrets`로 확인) |
+| `data/schemas/*.json` | API 응답 명세 (JSON Schema) | 관리 |
+| `data/baselines/` | 화면 비교 기준 이미지 (OS·실행 단위별) | 관리 |
+| `data/config.json` | 대상·API URL, 기기 프리셋, 앱 정보, 재시도·타임아웃, 화면 비교 허용 차이, 종료 기준, 격리 기준, ROI 기준, AI 모델. **설정** 화면에서 바꿉니다 | 관리 |
+| `data/state/` | 실행 결과·증적, 이슈, 판정 이력, 비밀값(`secrets.json`) | 제외 |
 | `generated/` | 실행마다 생성되는 Playwright 스크립트 | 제외 |
 
 예시 TC는 연습 사이트 [saucedemo.com](https://www.saucedemo.com)을 대상으로 합니다. `TC-CHECKOUT-002`는 일부러 결함이 심어진 `problem_user` 계정을 써서 실패·분류·이슈 흐름을 보여주는 TC입니다.
@@ -143,8 +169,9 @@ npm run ci -- --platforms pc,mw --tags smoke --exclude-tags demo-bug --label "�
 ## 판정과 분류 규칙
 
 - **Flaky**: 첫 시도 실패, 자동 재시도 통과. 최근 10회 중 3회 이상 Flaky면 격리되어 통과율에서 빠집니다.
-- **Blocked**: 사전 점검 실패(URL 접속 불가, 브라우저·기기 없음 등)나 스크립트 변환 실패. 통과율에서 빠지고 종료 기준에서 따로 셉니다.
-- **실패 분류 제안**: 값이 다름 → 제품 결함 의심 / 요소 없음 + 다른 플랫폼에선 같은 스텝 통과 → 스크립트 수정 필요 / 요소 없음 + 모든 플랫폼 실패 → 제품 결함 또는 UI 변경 / 네트워크·타임아웃 → 환경 문제. 확정은 QA가 결과 상세 화면에서 합니다.
+- **Blocked**: 사전 점검 실패(URL 접속 불가, 브라우저·기기 없음 등), 비밀값 없음, 스크립트 변환 실패. 통과율에서 빠지고 종료 기준에서 따로 셉니다.
+- **데이터 행**: 행 중 하나라도 실패하면 TC는 Fail, 증적·실패 스텝은 가장 나쁜 행 기준입니다.
+- **실패 분류 제안**: 값이 다름(응답 코드·응답 값·스키마 포함) → 제품 결함 의심 / 접근성 위반 → 제품 결함 의심 / 화면 비교 차이 → 제품 결함 또는 UI 변경 / 요소 없음 + 다른 플랫폼에선 같은 스텝 통과 → 스크립트 수정 필요 / 요소 없음 + 모든 플랫폼 실패 → 제품 결함 또는 UI 변경 / 네트워크·타임아웃·비밀값 없음 → 환경 문제. 확정은 QA가 결과 상세 화면에서 합니다.
 - **이슈**: `플랫폼 | TC | 스텝 | 오류 유형 | 대상`이 같으면 같은 이슈로 묶고 발생 횟수만 올립니다. 수정 완료 후 재검증이 Pass면 종료, 다시 실패하면 재오픈됩니다.
 
 ## 구조
@@ -154,6 +181,7 @@ AutoTC.exe            런처 (node scripts/start.js 실행)
 launcher/AutoTC.cs    런처 소스
 scripts/start.js      첫 실행 설치 → 서버 시작 → 브라우저 열기
 scripts/ci.js         명령줄 실행 (CI용), 요약·JUnit 생성, 슬랙 알림
+scripts/secret-scan.js 비밀값 평문 검사
 .github/workflows/    GitHub Actions 워크플로
 server/
   index.js            로컬 HTTP 서버 + API
@@ -166,7 +194,11 @@ server/
   figma.js            피그마 REST API (프레임 이미지, 텍스트 레이어)
   settings.js         설정 화면 (config 검증·저장, 기기 프리셋 목록, 대상 사이트 접속·식별자 속성 확인)
   generator.js        TC JSON → Playwright(.spec.ts) / Maestro(YAML)
-  tc.js               TC 검증, 공통 흐름 펼치기, 테스트 데이터 치환
+  tc.js               TC 검증, 공통 흐름 펼치기, 테스트 데이터·데이터 행·비밀값 치환
+  runtime.js          생성된 스크립트가 쓰는 도우미 (JSON 경로, 스키마 검증, 비밀값, 접근성 검사, 수리 후보 수집)
+  secrets.js          비밀값 참조·저장·실행 환경변수
+  heal.js             요소 수리 제안 (식별자 유사도, 사람 승인)
+  metrics.js          품질 지표 (추세, 히스토그램, ROI, 커버리지, 분포)
   classify.js         오류 유형, 실패 분류, 시그니처, 결함 초안
   issues.js           이슈 생성·중복 묶기·재검증·격리
   precheck.js         플랫폼별 사전 점검
@@ -180,3 +212,5 @@ test/                 단위 테스트
 
 - 아이폰 **실행** (사전 점검과 YAML 생성만 됨)
 - 안드로이드 여러 기기 동시 실행 (지금은 한 대에서 순서대로)
+- 앱(안드로이드·아이폰)의 화면 비교·접근성 검사·API 스텝 (웹·API만)
+- 계약 테스트(Pact), 성능 테스트, 테스트 관리 도구(TestRail·Xray) 직접 연동 (JUnit XML은 두 도구 모두 가져올 수 있음)

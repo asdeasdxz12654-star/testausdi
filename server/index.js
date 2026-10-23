@@ -16,6 +16,8 @@ const importer = require('./importer');
 const ai = require('./ai');
 const mapping = require('./mapping');
 const settings = require('./settings');
+const secrets = require('./secrets');
+const metrics = require('./metrics');
 const pkg = require('../package.json');
 
 const MIME = {
@@ -63,7 +65,7 @@ function sendFile(res, base, rel) {
   });
 }
 
-const ctx = () => ({ config: store.getConfig(), elements: store.getElements(), flows: store.getFlows(), testData: store.getTestData() });
+const ctx = () => ({ config: store.getConfig(), elements: store.getElements(), flows: store.getFlows(), testData: store.getTestData(), schemas: store.getSchemas() });
 
 // ---- API ----
 route('GET', '/api/ping', () => ({ app: 'autotc', version: pkg.version }));
@@ -73,6 +75,19 @@ route('GET', '/api/meta', () => ({
   priorities: PRIORITIES, automation: AUTOMATION, classifications: CLASSIFICATIONS, issueTypeOf: ISSUE_TYPE,
   statuses: { BUG: issuesLib.BUG_STATUSES, OTHER: issuesLib.OTHER_STATUSES }, severities: issuesLib.SEVERITIES,
 }));
+
+route('GET', '/api/schemas', () => store.getSchemas());
+
+// 비밀값: 이름과 출처만 돌려주고 값은 절대 돌려주지 않는다
+route('GET', '/api/secrets', () => secrets.status(store.getTestData()));
+route('PUT', '/api/secrets/:name', ({ name }, body) => { secrets.save(name, body.value); return secrets.status(store.getTestData()); });
+route('DELETE', '/api/secrets/:name', ({ name }) => { secrets.remove(name); return secrets.status(store.getTestData()); });
+
+route('GET', '/api/metrics', () => {
+  const limit = 30;
+  const ids = store.listRuns().filter((r) => r.status === 'done').slice(0, limit).map((r) => r.id).reverse();
+  return metrics.compute({ runs: ids.map((id) => store.getRun(id)), tcs: store.listTcs(), issues: store.getIssues(), history: store.getHistory(), config: store.getConfig() });
+});
 
 route('GET', '/api/config', () => store.getConfig());
 route('PUT', '/api/config', (_, body) => settings.save(body));
@@ -129,7 +144,7 @@ route('PUT', '/api/elements', (_, body) => {
   for (const tc of store.listTcs()) {
     tc.steps.forEach((s, i) => {
       const def = ACTIONS[s.action];
-      if (def.target === 'element' && !body.elements[s.target]) errors.push(`${tc.id} ${i + 1}번 스텝이 쓰는 요소 ${s.target}이(가) 없습니다`);
+      if (def.target === 'element' && s.target && !body.elements[s.target]) errors.push(`${tc.id} ${i + 1}번 스텝이 쓰는 요소 ${s.target}이(가) 없습니다`);
       if (def.target === 'screen' && !body.screens[s.target]) errors.push(`${tc.id} ${i + 1}번 스텝이 쓰는 화면 ${s.target}이(가) 없습니다`);
     });
   }
@@ -172,6 +187,28 @@ route('PUT', '/api/runs/:id/results/:key', ({ id, key }, body) => {
       store.saveIssues(issues);
     }
   }
+  return runner.withSummary(run);
+});
+
+// 요소 수리 제안 반영: QA가 승인한 제안 하나를 요소 맵에 쓴다. 이전 식별자는 요소에 기록으로 남긴다
+route('POST', '/api/runs/:id/results/:key/heal/:index', ({ id, key, index }) => {
+  const cur = runner.getCurrent();
+  if (cur && cur.id === id) throw new HttpError(409, '실행이 끝난 뒤 반영할 수 있습니다');
+  const run = store.getRun(id);
+  const r = run.results.find((x) => x.key === key);
+  const s = r && r.heal && r.heal[Number(index)];
+  if (!s || !s.suggestion) throw new HttpError(404, '반영할 수리 제안이 없습니다');
+  if (s.appliedAt) throw new HttpError(409, '이미 반영한 제안입니다');
+  const elements = store.getElements();
+  const el = elements.elements[s.element];
+  if (!el) throw new HttpError(404, `요소 맵에 없는 요소: ${s.element}`);
+  if (JSON.stringify(el.web) !== JSON.stringify(s.current)) throw new HttpError(409, `${s.element} 식별자가 실행 이후 바뀌었습니다. 요소 맵에서 직접 확인하세요`);
+  const at = new Date().toISOString();
+  el.webHistory = [...(el.webHistory || []), { at, runId: id, from: el.web, to: s.suggestion }].slice(-5);
+  el.web = s.suggestion;
+  store.saveElements(elements);
+  s.appliedAt = at;
+  store.saveRun(run);
   return runner.withSummary(run);
 });
 
@@ -298,6 +335,7 @@ async function handle(req, res) {
   }
   if (req.method !== 'GET') return sendJson(res, 405, { error: '허용되지 않는 요청입니다' });
   if (pathname.startsWith('/files/')) return sendFile(res, P.RUNS, pathname.slice('/files/'.length));
+  if (pathname.startsWith('/baselines/')) return sendFile(res, path.join(P.DATA, 'baselines'), pathname.slice('/baselines/'.length));
   if (pathname.startsWith('/mapping-files/')) return sendFile(res, path.join(P.STATE, 'mapping'), pathname.slice('/mapping-files/'.length));
   return sendFile(res, P.WEB, pathname === '/' ? 'index.html' : pathname.slice(1));
 }

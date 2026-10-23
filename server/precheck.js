@@ -103,7 +103,12 @@ async function checkIos(config) {
   return { platform: 'ios', items };
 }
 
-const CHECKS = { pc: checkPc, mw: checkMw, android: checkAndroid, ios: checkIos };
+async function checkApi(config) {
+  const base = config.apiBaseURL || config.baseURL;
+  return { platform: 'api', items: [await checkUrl(base).then((r) => ({ label: 'API 주소', ...r }))] };
+}
+
+const CHECKS = { pc: checkPc, mw: checkMw, android: checkAndroid, ios: checkIos, api: checkApi };
 
 async function precheck(config, platforms = Object.keys(CHECKS), tools) {
   const results = await Promise.all(platforms.map((p) => CHECKS[p](config, tools)));

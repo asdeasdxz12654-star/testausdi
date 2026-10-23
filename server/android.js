@@ -9,14 +9,15 @@ const { stepTitle } = require('./tc');
 // Windows의 maestro는 .bat이라 셸을 거쳐야 한다 (Node 20+는 셸 없이 .bat 실행을 막는다)
 const quoteArg = (a) => (/[\s"&|<>^()]/.test(a) ? `"${String(a).replace(/"/g, '\\"')}"` : a);
 
-function runProcess(cmd, args = [], { cwd, timeout = 60000 } = {}) {
+function runProcess(cmd, args = [], { cwd, timeout = 60000, env } = {}) {
   return new Promise((resolve) => {
     const viaShell = process.platform === 'win32' && cmd === 'maestro';
+    const fullEnv = env ? { ...process.env, ...env } : undefined;
     let child;
     try {
       child = viaShell
-        ? spawn([cmd, ...args].map(quoteArg).join(' '), { cwd, shell: true, windowsHide: true })
-        : spawn(cmd, args, { cwd, windowsHide: true });
+        ? spawn([cmd, ...args].map(quoteArg).join(' '), { cwd, shell: true, windowsHide: true, env: fullEnv })
+        : spawn(cmd, args, { cwd, windowsHide: true, env: fullEnv });
     } catch (error) {
       resolve({ code: null, stdout: '', stderr: '', error });
       return;
@@ -192,7 +193,8 @@ function attachmentsIn(dir) {
 }
 
 // TC 하나를 재시도 포함해 실행한다. 반환 형식은 reporter.js의 test 항목과 같다
-async function runTc({ tc, flow, serial, retries, timeoutMs, outDir, tools = defaultTools, log = () => {} }) {
+// env: 비밀값(MAESTRO_AUTOTC_SECRET_*). Maestro는 MAESTRO_로 시작하는 환경변수를 YAML의 ${...}에 채운다
+async function runTc({ tc, flow, serial, retries, timeoutMs, outDir, env, tools = defaultTools, log = () => {} }) {
   const attempts = [];
   for (let retry = 0; retry <= retries; retry += 1) {
     const dir = path.join(outDir, `attempt-${retry}`);
@@ -202,7 +204,7 @@ async function runTc({ tc, flow, serial, retries, timeoutMs, outDir, tools = def
     await tools.run('adb', ['-s', serial, 'logcat', '-c'], { timeout: 10000 });
     log(`[안드로이드] ${tc.id} 실행${retry ? ` (재시도 ${retry})` : ''}`);
     const started = Date.now();
-    const res = await tools.run('maestro', ['--device', serial, 'test', yamlFile, '--format', 'junit', '--output', path.join(dir, 'junit.xml'), '--debug-output', path.join(dir, 'debug')], { cwd: dir, timeout: timeoutMs });
+    const res = await tools.run('maestro', ['--device', serial, 'test', yamlFile, '--format', 'junit', '--output', path.join(dir, 'junit.xml'), '--debug-output', path.join(dir, 'debug')], { cwd: dir, timeout: timeoutMs, env });
     const duration = Date.now() - started;
     const lc = await tools.run('adb', ['-s', serial, 'logcat', '-d', '-v', 'time'], { timeout: 20000 });
     const logcat = (lc.stdout || '').split(/\r?\n/).slice(-5000).join('\n');

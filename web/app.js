@@ -70,11 +70,11 @@ function confirmButton(label, onConfirm, cls = 'btn danger') {
 
 // ---------- 데이터 ----------
 async function loadAll() {
-  const [meta, config, tcs, elements, flows, runs, issues] = await Promise.all([
+  const [meta, config, tcs, elements, flows, runs, issues, schemas] = await Promise.all([
     api('GET', '/api/meta'), api('GET', '/api/config'), api('GET', '/api/tcs'), api('GET', '/api/elements'),
-    api('GET', '/api/flows'), api('GET', '/api/runs'), api('GET', '/api/issues'),
+    api('GET', '/api/flows'), api('GET', '/api/runs'), api('GET', '/api/issues'), api('GET', '/api/schemas'),
   ]);
-  Object.assign(S, { meta, config, tcs, elements, flows, runs, issues });
+  Object.assign(S, { meta, config, tcs, elements, flows, runs, issues, schemas });
   document.getElementById('projName').textContent = `${config.project} · ${config.env} · v${meta.version}`;
   const running = runs.find((r) => r.status === 'running');
   if (running) startPolling(running.id);
@@ -136,7 +136,7 @@ async function route() {
     if (active) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   });
   if (v !== 'mapping') { clearInterval(S.mapPoll); S.mapPoll = null; }
-  const views = { dash: renderDash, tcs: () => renderTcs(rest[0]), import: renderImport, mapping: () => renderMapping(rest[0]), settings: renderSettings, elements: renderElements, devices: renderDevices, issues: renderIssues, result: () => renderResult(rest[0], rest[1]) };
+  const views = { dash: renderDash, tcs: () => renderTcs(rest[0]), import: renderImport, mapping: () => renderMapping(rest[0]), settings: renderSettings, elements: renderElements, devices: renderDevices, issues: renderIssues, metrics: renderMetrics, result: () => renderResult(rest[0], rest[1]) };
   await (views[v] || renderDash)();
 }
 
@@ -166,17 +166,20 @@ function newRunCard(disabled) {
   const tags = [...new Set(S.tcs.flatMap((t) => t.tags || []))].sort();
   const form = h('form', { class: 'stack' });
   const platRow = h('div', { class: 'row' }, h('span', { class: 'sub' }, '플랫폼'),
-    S.meta.platforms.map((p) => h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'platform', value: p, checked: p === 'pc' || p === 'mw' }), plat(p))));
+    S.meta.platforms.map((p) => h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'platform', value: p, checked: p === 'pc' || p === 'mw' || p === 'api' }), plat(p))));
+  const hasVisual = S.tcs.some((t) => t.steps.some((s) => s.action === 'assertScreenshot'));
   const suite = h('select', { name: 'suite', id: 'suiteSel' }, h('option', { value: '' }, `전체 자동화 TC (${S.tcs.filter((t) => t.automation !== '수동 유지').length}건)`),
     tags.map((t) => h('option', { value: t }, `@${t} (${S.tcs.filter((x) => (x.tags || []).includes(t)).length}건)`)));
   form.append(h('div', { class: 'row between' }, h('h2', {}, '새 실행'), h('span', { class: 'sub' }, `대상 ${S.config.baseURL}`)),
     platRow,
-    h('div', { class: 'row' }, h('span', { class: 'sub' }, '스위트'), suite, h('button', { class: 'btn primary', type: 'submit', disabled }, disabled ? '실행 중…' : '실행')));
+    h('div', { class: 'row' }, h('span', { class: 'sub' }, '스위트'), suite, h('button', { class: 'btn primary', type: 'submit', disabled }, disabled ? '실행 중…' : '실행')),
+    hasVisual ? h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'updateBaselines' }), '화면 비교 기준 이미지를 이번 화면으로 갱신 (의도한 디자인 변경을 반영할 때만)') : null);
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     const platforms = [...form.querySelectorAll('input[name=platform]:checked')].map((i) => i.value);
     const tag = form.querySelector('select[name=suite]').value;
-    startRun({ platforms, tags: tag ? [tag] : undefined });
+    const ub = form.querySelector('input[name=updateBaselines]');
+    startRun({ platforms, tags: tag ? [tag] : undefined, updateBaselines: !!(ub && ub.checked), label: ub && ub.checked ? '기준 이미지 갱신' : undefined });
   });
   return h('section', { class: 'card' }, form);
 }
@@ -212,7 +215,8 @@ function runSummary(run) {
     h('div', { class: `verdict ${sm.releasable ? 'yes' : 'no'}` }, sm.releasable ? '종료 기준 충족' : '종료 기준 미충족'),
     h('ul', { class: 'criteria' }, sm.exit.map((e) => h('li', {}, h('span', {}, h('span', { class: e.ok ? 'ok' : 'bad' }, e.ok ? '✓ ' : '✕ '), e.label),
       h('span', { class: 'sub' }, `${e.percent ? pct(e.value) : e.value} / 기준 ${e.percent ? pct(e.max) : `${e.max} 이하`}`)))),
-    sm.quarantined ? h('div', { class: 'sub' }, `격리된 Flaky TC ${sm.quarantined}건은 집계에서 뺐습니다`) : null);
+    sm.quarantined ? h('div', { class: 'sub' }, `격리된 Flaky TC ${sm.quarantined}건은 집계에서 뺐습니다`) : null,
+    sm.newBaselines ? h('div', { class: 'sub warn' }, `화면 비교 기준 이미지를 새로 저장한 결과 ${sm.newBaselines}건: 결과 상세에서 화면을 확인하세요`) : null);
 
   const bars = h('div', {}, h('h3', {}, '플랫폼별 결과'), run.platforms.map((p) => {
     const b = sm.byPlatform[p];
@@ -233,7 +237,7 @@ function runSummary(run) {
         h('td', {}, h('div', { class: 'mono' }, r.tcId), h('div', { class: 'sub' }, r.title)),
         h('td', {}, plat(r.platform), h('div', { class: 'sub' }, r.device)),
         h('td', {}, pill(r.status), r.quarantined ? h('div', { class: 'sub warn' }, '격리') : null),
-        h('td', {}, r.failedStep ? r.failedStep.title : (r.reason || '-')),
+        h('td', {}, r.failedStep ? r.failedStep.title : (r.reason || '-'), r.failedRow ? h('div', { class: 'sub' }, `데이터 행: ${r.failedRow}`) : null),
         h('td', {}, r.classification.confirmed ? h('span', {}, clsLabel(r.classification.confirmed), h('span', { class: 'sub' }, ' (확정)')) : clsLabel(r.classification.proposed)),
         h('td', {}, r.issueId ? h('span', {}, h('span', { class: 'mono' }, r.issueId), r.knownIssue ? h('div', { class: 'sub' }, '기존 이슈') : h('div', { class: 'sub' }, '신규')) : '-'))))))
       : h('div', { class: 'empty' }, S.dashFilter === 'problem' ? 'Fail·Flaky 결과가 없습니다' : '해당하는 결과가 없습니다'));
@@ -249,7 +253,11 @@ async function renderResult(runId, key) {
   if (!r) { app().replaceChildren(h('div', { class: 'empty' }, '결과를 찾을 수 없습니다')); return; }
   const others = run.results.filter((o) => o.tcId === r.tcId && o.key !== r.key);
   const basis = r.status === 'Flaky' ? r.attempts.find((a) => a.status !== 'passed') : r.attempts[r.attempts.length - 1];
-  const shot = r.attachments.find((a) => a.contentType === 'image/png');
+  const isDiffImg = (a) => /-(expected|actual|diff)\.png$/.test(a.name);
+  const shot = r.attachments.find((a) => a.name === 'screenshot') || r.attachments.find((a) => a.contentType === 'image/png' && !isDiffImg(a));
+  const diffImgs = r.attachments.filter(isDiffImg);
+  const apiFiles = r.attachments.filter((a) => /^api-\d+$/.test(a.name));
+  const a11yFile = r.attachments.find((a) => a.name === 'a11y');
   const video = r.attachments.find((a) => a.contentType && a.contentType.startsWith('video/'));
   const trace = r.attachments.find((a) => a.name === 'trace');
   const ctxFile = r.attachments.find((a) => a.name === 'error-context');
@@ -262,9 +270,17 @@ async function renderResult(runId, key) {
       h('div', { class: 'row' }, pill(r.status), r.issueId ? h('a', { class: 'btn', href: '#issues' }, `${r.issueId}${r.knownIssue ? ' (기존 이슈)' : ''}`) : null,
         h('button', { class: 'btn', type: 'button', onclick: () => startRun({ tcIds: [r.tcId], platforms: [r.platform], label: `재실행 ${r.tcId}` }) }, '이 TC 재실행'),
         h('a', { class: 'btn', href: `#tcs/${encodeURIComponent(r.tcId)}` }, 'TC 열기'))),
-    r.reason ? h('div', { class: r.status === 'Blocked' ? 'errbox' : 'notice' }, r.reason) : null);
+    r.reason ? h('div', { class: r.status === 'Blocked' ? 'errbox' : 'notice' }, r.reason) : null,
+    r.trace ? h('div', { class: 'sub' }, '추적 ID ', h('span', { class: 'mono' }, r.trace), ' · API 요청 헤더 x-autotc-trace로 보냅니다. 서버 로그에서 이 값으로 찾으세요') : null);
 
   const left = h('div', { class: 'stack' });
+  if (r.rows) {
+    left.append(h('section', { class: 'card stack' }, h('h3', {}, `데이터 행 ${r.rows.length}개`),
+      h('div', { class: 'tbl' }, h('table', {}, h('thead', {}, h('tr', {}, ['행', '결과', '시간'].map((t) => h('th', {}, t)))),
+        h('tbody', {}, r.rows.map((x) => h('tr', {}, h('td', {}, x.name), h('td', {}, pill(x.status)), h('td', { class: 'num' }, fmtDur(x.durationMs))))))),
+      r.failedRow ? h('div', { class: 'sub' }, `아래 스텝·오류·증적은 "${r.failedRow}" 행 기준입니다`) : null));
+  }
+  if (r.heal && r.heal.length) left.append(healCard(run, r, () => renderResult(runId, key)));
   if (basis) {
     const failedNo = r.failedStep && r.failedStep.no;
     left.append(h('section', { class: 'card' }, h('h3', {}, r.status === 'Flaky' ? '첫 실패 시도의 스텝' : '스텝'),
@@ -301,6 +317,14 @@ async function renderResult(runId, key) {
   }
 
   const right = h('div', { class: 'stack' });
+  if (diffImgs.length) {
+    const label = { expected: '기준', actual: '이번 실행', diff: '차이' };
+    right.append(h('section', { class: 'card stack' }, h('h3', {}, '화면 비교'),
+      h('div', { class: 'diffs' }, diffImgs.map((a) => h('figure', {}, h('a', { href: a.url, target: '_blank', rel: 'noopener' }, h('img', { src: a.url, alt: a.name })), h('figcaption', {}, label[a.name.match(/-(expected|actual|diff)\.png$/)[1]])))),
+      r.baselineCreated ? h('div', { class: 'sub warn' }, '기준 이미지를 이번에 처음 저장했습니다. 화면이 의도한 모습이면 data/baselines를 Git에 커밋하세요') : null));
+  }
+  if (a11yFile) right.append(a11yCard(a11yFile));
+  if (apiFiles.length) right.append(apiCard(apiFiles));
   if (shot) right.append(h('section', { class: 'card stack' }, h('h3', {}, r.status === 'Pass' ? '마지막 화면' : '실패 시점 화면'), h('a', { href: shot.url, target: '_blank', rel: 'noopener' }, h('img', { class: 'shot', src: shot.url, alt: `${r.tcId} ${PL(r.platform)} 스크린샷` }))));
   if (video || trace || ctxFile || logFiles.length) {
     right.append(h('section', { class: 'card stack' }, h('h3', {}, '증적'),
@@ -317,6 +341,49 @@ async function renderResult(runId, key) {
       h('div', { class: 'stack' }, others.map((o) => h('a', { class: 'row between', href: `#result/${run.id}/${encodeURIComponent(o.key)}`, style: 'text-decoration:none;color:inherit' }, h('span', { class: 'row' }, plat(o.platform), h('span', { class: 'sub' }, o.device)), pill(o.status))))));
   }
   app().replaceChildren(head, h('div', { class: 'result-grid' }, left, right));
+}
+
+// 요소 수리 제안: 사람이 확인하고 반영한다. 자동으로 고치지 않는 이유를 함께 보여준다
+function healCard(run, r, refresh) {
+  return h('section', { class: 'card stack' },
+    h('h3', {}, '요소 수리 제안'),
+    h('div', { class: 'sub' }, '실패 시점 화면에서 요소 맵 식별자와 비슷한 요소를 찾았습니다. 화면이 바뀐 것인지(스크립트 수정) 기능이 망가진 것인지(제품 결함) 확인한 뒤 반영하세요. 기대한 요소를 다른 요소로 바꿔 통과시키면 결함을 숨길 수 있어 자동으로 고치지 않습니다.'),
+    r.heal.map((s, i) => h('div', { class: 'notice stack' },
+      h('div', { class: 'row between' }, h('b', {}, `${s.label} · ${s.element}`), s.suggestion ? h('span', { class: 'sub' }, `유사도 ${Math.round(s.score * 100)}%`) : null),
+      h('div', { class: 'mono' }, `현재: ${JSON.stringify(s.current)}`),
+      s.suggestion ? h('div', { class: 'mono' }, `제안: ${JSON.stringify(s.suggestion)}`) : null,
+      h('div', { class: 'sub' }, s.reason),
+      s.suggestion ? (s.appliedAt
+        ? h('div', { class: 'row' }, h('span', { class: 'ok' }, `✓ ${fmtTime(s.appliedAt)} 요소 맵에 반영함`), h('button', { class: 'btn small', type: 'button', onclick: () => startRun({ tcIds: [r.tcId], platforms: [r.platform], label: `수리 확인 ${r.tcId}` }) }, '다시 실행해 확인'))
+        : h('div', { class: 'row' }, h('button', { class: 'btn small primary', type: 'button', onclick: async () => {
+          const updated = await guard(() => api('POST', `/api/runs/${run.id}/results/${encodeURIComponent(r.key)}/heal/${i}`));
+          if (!updated) return;
+          S.runCache[run.id] = updated;
+          S.elements = await api('GET', '/api/elements');
+          toast('요소 맵에 반영했습니다. 다시 실행해 확인하세요');
+          refresh();
+        } }, '요소 맵에 반영'), h('span', { class: 'sub' }, '반영하면 실패 분류를 "스크립트 수정 필요"로 확정하는 것이 맞습니다'))) : null)));
+}
+
+function a11yCard(file) {
+  const body = h('div', { class: 'stack' }, h('span', { class: 'sub' }, '불러오는 중…'));
+  fetch(file.url).then((x) => x.json()).then((d) => {
+    body.replaceChildren(
+      h('div', { class: 'sub' }, `WCAG 2.2 AA 자동 검사 · 위반 ${d.total}종 · 실패 기준 ${d.level} 이상`),
+      d.violations.length ? h('ul', { class: 'checks a11y' }, d.violations.map((v) => h('li', {}, h('span', { class: ['critical', 'serious'].includes(v.impact) ? 'bad' : 'warn' }, v.impact), h('span', { class: 'lbl' }, v.id),
+        h('span', {}, `${v.help} · ${v.count}곳 `, h('a', { href: v.helpUrl, target: '_blank', rel: 'noopener' }, '설명'))))) : h('div', { class: 'ok' }, '✓ 자동 검사로 찾은 위반이 없습니다'),
+      h('div', { class: 'sub' }, '자동 검사는 WCAG 위반의 일부만 찾습니다. 키보드 이동, 스크린 리더 읽기, 대체 텍스트의 적절성은 사람이 확인해야 합니다'),
+      h('a', { class: 'btn small', href: file.url, target: '_blank', rel: 'noopener' }, '전체 결과 (JSON)'));
+  }).catch(() => body.replaceChildren(h('a', { href: file.url, target: '_blank', rel: 'noopener' }, '접근성 결과 열기')));
+  return h('section', { class: 'card stack' }, h('h3', {}, '접근성'), body);
+}
+
+function apiCard(files) {
+  const pre = h('pre', { style: 'max-height:280px' }, '');
+  const show = (a) => fetch(a.url).then((x) => x.text()).then((t) => { pre.textContent = t; }).catch(() => { pre.textContent = '불러오지 못했습니다'; });
+  show(files[files.length - 1]);
+  return h('section', { class: 'card stack' }, h('h3', {}, 'API 응답'),
+    h('div', { class: 'chips' }, files.map((a) => h('button', { class: 'chip', type: 'button', onclick: () => show(a) }, `${a.name.replace('api-', '')}번 스텝`))), pre);
 }
 
 // ---------- TC 편집 ----------
@@ -354,6 +421,24 @@ async function renderTcs(id) {
   app().replaceChildren(h('div', { class: 'split' }, side, S.draft ? tcEditor() : h('div', { class: 'empty' }, 'TC가 없습니다. 새 TC를 만들어 보세요.')));
 }
 
+const poolOf = (target) => ({ screen: S.elements.screens, element: S.elements.elements, flow: S.flows, schema: S.schemas }[target] || null);
+
+// 데이터 행 ↔ 표 텍스트. 첫 줄은 머리글(첫 칸은 행 이름), 엑셀에서 복사한 탭 구분도 그대로 붙여넣을 수 있다
+function rowsToText(sets) {
+  if (!sets || !sets.length) return '';
+  const keys = [...new Set(sets.flatMap((r) => Object.keys(r.values)))];
+  const sep = (v) => String(v).replace(/[\t\n]/g, ' ');
+  return [['name', ...keys].join('\t'), ...sets.map((r) => [sep(r.name), ...keys.map((k) => sep(r.values[k] ?? ''))].join('\t'))].join('\n');
+}
+
+function textToRows(text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim());
+  if (!lines.length) return [];
+  const split = (l) => (l.includes('\t') ? l.split('\t') : l.split(','));
+  const [head, ...rest] = lines.map(split);
+  return rest.map((cells) => ({ name: (cells[0] || '').trim(), values: Object.fromEntries(head.slice(1).map((k, i) => [k.trim(), cells[i + 1] === undefined ? '' : cells[i + 1]])) }));
+}
+
 function tcEditor() {
   const d = S.draft;
   const isNew = S.draftId === 'new';
@@ -370,7 +455,8 @@ function tcEditor() {
     field('우선순위', select('priority', S.meta.priorities)),
     field('자동화', select('automation', S.meta.automation)),
     field('태그 (쉼표로 구분)', list('tags')),
-    field('요구사항 ID (쉼표로 구분)', list('reqIds'), 'wide'),
+    field('요구사항 ID (쉼표로 구분)', list('reqIds')),
+    field('수동 실행 시간 (분)', h('input', { type: 'number', min: '0', step: '0.5', id: 'f-manualMinutes', value: d.manualMinutes ?? '', placeholder: `비우면 ${(S.config.roi && S.config.roi.manualMinutesDefault) || 5}분으로 계산`, oninput: (e) => { d.manualMinutes = e.target.value === '' ? undefined : Number(e.target.value); mark(); } })),
     field('사전조건', h('textarea', { id: 'f-pre', rows: '2', oninput: (e) => { d.precondition = e.target.value; mark(); } }, d.precondition), 'wide'),
     h('div', { class: 'wide row' }, h('span', { class: 'sub' }, '플랫폼'), S.meta.platforms.map((p) => h('label', { class: 'check' },
       h('input', { type: 'checkbox', checked: d.platforms.includes(p), onchange: (e) => { d.platforms = e.target.checked ? [...new Set([...d.platforms, p])] : d.platforms.filter((x) => x !== p); mark(); } }), plat(p)))));
@@ -379,7 +465,19 @@ function tcEditor() {
   const drawSteps = () => {
     stepsBody.replaceChildren(...d.steps.map((s, i) => {
       const def = S.meta.actions[s.action];
-      const targets = def.target === 'screen' ? S.elements.screens : def.target === 'element' ? S.elements.elements : def.target === 'flow' ? S.flows : null;
+      const targets = poolOf(def.target);
+      const targetCell = def.target === 'path'
+        ? h('input', { type: 'text', 'aria-label': `${i + 1}번 스텝 응답 경로`, value: s.target || '', placeholder: '응답 경로 (예: data.items[0].id)', oninput: (e) => { s.target = e.target.value; mark(); } })
+        : targets ? h('select', { 'aria-label': `${i + 1}번 스텝 대상`, onchange: (e) => { s.target = e.target.value; mark(); } },
+          def.targetOptional ? h('option', { value: '', selected: !s.target }, '(화면 전체)') : null,
+          Object.entries(targets).map(([k, t]) => h('option', { value: k, selected: k === s.target }, t.label ? `${t.label} · ${k}` : k)))
+          : h('span', { class: 'sub' }, '-');
+      const valueInput = !def.value ? h('span', { class: 'sub' }, '-')
+        : def.options ? h('select', { 'aria-label': `${i + 1}번 스텝 값`, onchange: (e) => { s.value = e.target.value; mark(); } },
+          def.options.map((o) => h('option', { value: o, selected: (s.value || def.options[1]) === o }, o)))
+          : h('input', { type: 'text', 'aria-label': `${i + 1}번 스텝 값`, value: s.value || '', placeholder: def.placeholder || '값 또는 {{account.id}}', oninput: (e) => { s.value = e.target.value; mark(); } });
+      const valueCell = h('div', { class: 'stack', style: 'gap:4px' }, valueInput,
+        def.body ? h('textarea', { class: 'mono', rows: '2', 'aria-label': `${i + 1}번 스텝 요청 본문`, placeholder: '요청 본문 JSON (선택) 예: {"title": "{{row.title}}"}', oninput: (e) => { s.body = e.target.value; mark(); } }, s.body || '') : null);
       const support = S.meta.platforms.map((p) => {
         const m = def.support[p];
         return h('i', { class: `${p}${m === 'run' ? ' on' : ''}`, title: `${PL(p)}: ${m === 'run' ? '실행' : m === 'noop' ? '건너뜀' : '지원 안 함'}` });
@@ -389,14 +487,17 @@ function tcEditor() {
         h('td', {}, h('select', { 'aria-label': `${i + 1}번 스텝 액션`, onchange: (e) => {
           s.action = e.target.value;
           const nd = S.meta.actions[s.action];
-          const pool = nd.target === 'screen' ? S.elements.screens : nd.target === 'element' ? S.elements.elements : nd.target === 'flow' ? S.flows : null;
-          if (!pool) delete s.target; else if (!pool[s.target]) s.target = Object.keys(pool)[0];
-          if (!nd.value) delete s.value; else if (s.value === undefined) s.value = '';
+          const pool = poolOf(nd.target);
+          if (nd.target === 'path') s.target = s.target && !pool ? s.target : '';
+          else if (!pool) delete s.target;
+          else if (nd.targetOptional && !pool[s.target]) s.target = '';
+          else if (!pool[s.target]) s.target = Object.keys(pool)[0];
+          if (!nd.value) delete s.value; else if (nd.options) s.value = nd.options[1]; else if (s.value === undefined) s.value = '';
+          if (!nd.body) delete s.body;
           mark(); drawSteps();
         } }, Object.entries(S.meta.actions).map(([k, a]) => h('option', { value: k, selected: k === s.action }, `${a.label} (${k})`)))),
-        h('td', {}, targets ? h('select', { 'aria-label': `${i + 1}번 스텝 대상`, onchange: (e) => { s.target = e.target.value; mark(); } },
-          Object.entries(targets).map(([k, t]) => h('option', { value: k, selected: k === s.target }, `${t.label} · ${k}`))) : h('span', { class: 'sub' }, '-')),
-        h('td', {}, def.value ? h('input', { type: 'text', 'aria-label': `${i + 1}번 스텝 값`, value: s.value || '', placeholder: '값 또는 {{account.id}}', oninput: (e) => { s.value = e.target.value; mark(); } }) : h('span', { class: 'sub' }, '-')),
+        h('td', {}, targetCell),
+        h('td', {}, valueCell),
         h('td', {}, h('span', { class: 'dots' }, support)),
         h('td', { style: 'white-space:nowrap' },
           h('button', { class: 'icon-btn', type: 'button', title: '위로', 'aria-label': '위로', disabled: i === 0, onclick: () => { [d.steps[i - 1], d.steps[i]] = [d.steps[i], d.steps[i - 1]]; mark(); drawSteps(); } }, '↑'),
@@ -447,10 +548,15 @@ function tcEditor() {
         h('div', {}, h('div', { class: 'sub' }, '테스트 절차'), h('pre', { style: 'white-space:pre-wrap' }, d.source.steps || '-')),
         h('div', {}, h('div', { class: 'sub' }, '기대결과'), h('pre', { style: 'white-space:pre-wrap' }, d.source.expected || '-'))),
       h('div', { class: 'sub', style: 'margin-top:6px' }, '원문을 보고 아래 스텝을 채운 뒤 자동화를 "적합"으로 바꾸면 실행 대상이 됩니다')) : null,
-    h('div', { class: 'row between' }, h('h3', {}, `스텝 ${d.steps.length}개`), h('span', { class: 'sub' }, '점은 플랫폼 지원 여부 (PC · MW · 안드로이드 · 아이폰)')),
+    h('div', { class: 'row between' }, h('h3', {}, `스텝 ${d.steps.length}개`), h('span', { class: 'sub' }, '점은 플랫폼 지원 여부 (PC · MW · 안드로이드 · 아이폰 · API)')),
     h('div', { class: 'tbl' }, h('table', {}, h('thead', {}, h('tr', {}, ['#', '액션', '대상', '값', '지원', ''].map((t) => h('th', {}, t)))), stepsBody)),
     h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: () => { d.steps.push({ action: 'tap', target: Object.keys(S.elements.elements)[0] }); mark(); drawSteps(); } }, '스텝 추가'),
-      h('span', { class: 'sub' }, '값에 {{account.id}}처럼 쓰면 data/testdata.json 값으로 바뀌고, 리포트에는 실제 값 대신 이름만 남습니다')),
+      h('span', { class: 'sub' }, '값에 {{account.id}}처럼 쓰면 data/testdata.json 값으로 바뀌고, 리포트에는 실제 값 대신 이름만 남습니다. {{row.키}}는 아래 데이터 행 값, {{saved.이름}}은 앞의 "응답 값 저장" 스텝 값입니다')),
+    h('details', { class: 'notice', open: !!(d.dataSets && d.dataSets.length) },
+      h('summary', {}, `데이터 행 (데이터 주도) · ${(d.dataSets || []).length}행`),
+      h('div', { class: 'stack', style: 'margin-top:8px' },
+        h('div', { class: 'sub' }, '같은 스텝을 행마다 한 번씩 실행합니다. 첫 줄은 머리글이고 첫 칸은 행 이름입니다. 엑셀에서 표를 복사해 붙여넣어도 됩니다. 실제 비밀번호는 넣지 말고 테스트 데이터의 비밀값을 쓰세요.'),
+        h('textarea', { class: 'mono', rows: '5', id: 'f-rows', placeholder: 'name\tid\terror\n아이디 비움\t\tEpic sadface: Username is required', oninput: (e) => { d.dataSets = textToRows(e.target.value); mark(); } }, rowsToText(d.dataSets)))),
     h('div', { class: 'row between' }, h('h3', {}, '엔진별 코드'), h('button', { class: 'btn small', type: 'button', onclick: loadPreview }, '코드 보기')),
     previewBox);
 }
@@ -938,7 +1044,9 @@ async function renderSettings() {
       field('프로젝트 이름', 'project'),
       field('대상 사이트 주소', 'baseURL', { placeholder: 'https://qa.example.com' }),
       field('환경', 'env', { placeholder: 'qa / stg' }),
-      field('식별자 속성', 'testIdAttribute', { placeholder: 'data-testid' })),
+      field('식별자 속성', 'testIdAttribute', { placeholder: 'data-testid' }),
+      field('API 주소 (선택)', 'apiBaseURL', { placeholder: '비우면 대상 사이트 주소', hint: 'API 액션의 "GET /경로"가 이 주소 뒤에 붙습니다' }),
+      field('화면 비교 허용 차이 (%)', 'visual.maxDiffPixelRatio', { type: 'number', scale: 0.01, hint: '기준 이미지와 다른 픽셀이 이 비율 이하면 통과' })),
     h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: inspect }, '접속 확인'),
       h('span', { class: 'sub' }, '주소로 접속해 응답과, 요소 식별에 쓸 수 있는 속성(data-testid 등)을 찾아봅니다')),
     inspectOut,
@@ -1011,9 +1119,21 @@ async function renderSettings() {
       select('생각 깊이', 'ai.effort', meta.efforts.map((x) => [x, x]))),
     h('div', { class: 'sub' }, '기본값은 claude-opus-5-5 · high입니다. 깊이를 낮추면 비용과 시간이 줄지만 매핑 정확도가 떨어질 수 있습니다.'));
 
+  d.roi = d.roi || {};
+  const roiCard = h('section', { class: 'card stack' },
+    h('h3', {}, 'ROI 계산 기준'),
+    h('div', { class: 'form-grid' },
+      field('TC 수동 실행 기본 시간 (분)', 'roi.manualMinutesDefault', { type: 'number', hint: 'TC에 수동 실행 시간이 없을 때' }),
+      field('구축 시간 (시간)', 'roi.setupHours', { type: 'number', hint: '도구·환경·프레임워크 준비' }),
+      field('TC 하나 자동화 (분)', 'roi.authorMinutesPerTc', { type: 'number' }),
+      field('스크립트 수정 하나 (분)', 'roi.fixMinutesPerIssue', { type: 'number', hint: 'AUT 이슈 하나당' }),
+      field('실패 분석 하나 (분)', 'roi.analysisMinutesPerFailure', { type: 'number', hint: 'Fail·Flaky 결과 하나당' })),
+    h('div', { class: 'sub' }, '품질 지표 화면의 ROI = 절감 시간 ÷ 투자 시간 (ISTQB CT-TAS 5.1). 실제 팀 기록으로 바꿀수록 정확해집니다.'));
+
   const save = async () => {
     // 비율 입력은 %에서 바꾼 값이라 소수 둘째 자리로 맞춘다
     d.exitCriteria.flakyRateMax = Math.round(Number(getP('exitCriteria.flakyRateMax')) * 100) / 100;
+    if (d.visual) d.visual.maxDiffPixelRatio = Math.round(Number(d.visual.maxDiffPixelRatio) * 10000) / 10000;
     const saved = await guard(() => api('PUT', '/api/config', d));
     if (!saved) return;
     dirty = false;
@@ -1025,7 +1145,112 @@ async function renderSettings() {
   const bar = h('section', { class: 'card row between' },
     h('div', {}, h('h2', {}, '설정'), h('div', { class: 'sub' }, 'data/config.json에 저장됩니다. 다음 실행부터 적용됩니다.')),
     h('div', { class: 'row' }, dirtyEl, h('button', { class: 'btn', type: 'button', onclick: () => { dirty = false; renderSettings(); } }, '되돌리기'), h('button', { class: 'btn primary', type: 'button', onclick: save }, '저장')));
-  app().replaceChildren(bar, siteCard, devCard, appCard, runCard, exitCard, aiCard, aiSettingsCard(st, () => renderSettings()));
+  app().replaceChildren(bar, siteCard, await secretsCard(), devCard, appCard, runCard, exitCard, roiCard, aiCard, aiSettingsCard(st, () => renderSettings()));
+}
+
+// 비밀값: 값은 화면에 다시 보여주지 않는다. 테스트 데이터에는 {"secret": "이름"}으로만 둔다
+async function secretsCard() {
+  const list = await api('GET', '/api/secrets');
+  const body = h('div', { class: 'stack' });
+  const draw = (items) => {
+    const name = h('input', { type: 'text', placeholder: '이름 (예: QA_ADMIN_PASSWORD)', 'aria-label': '비밀값 이름', style: 'max-width:240px' });
+    const value = h('input', { type: 'password', placeholder: '값', 'aria-label': '비밀값 값', autocomplete: 'new-password', style: 'max-width:240px' });
+    const saveOne = async (n, v) => {
+      const out = await guard(() => api('PUT', `/api/secrets/${encodeURIComponent(n)}`, { value: v }));
+      if (out) { toast(`${n} 저장했습니다`); draw(out); }
+    };
+    body.replaceChildren(
+      items.length ? h('div', { class: 'tbl' }, h('table', {}, h('thead', {}, h('tr', {}, ['이름', '쓰는 곳', '상태', ''].map((t) => h('th', {}, t)))),
+        h('tbody', {}, items.map((s) => {
+          const v = h('input', { type: 'password', placeholder: s.source ? '바꿀 값' : '값 입력', 'aria-label': `${s.name} 값`, autocomplete: 'new-password', style: 'max-width:180px' });
+          return h('tr', {},
+            h('td', { class: 'mono' }, s.name),
+            h('td', { class: 'sub' }, s.usedBy.length ? s.usedBy.join(', ') : '테스트 데이터에서 안 씀'),
+            h('td', {}, s.source === 'env' ? h('span', { class: 'ok' }, '환경변수') : s.source === 'saved' ? h('span', { class: 'ok' }, '이 PC에 저장됨') : h('span', { class: 'bad' }, '없음 (이 값을 쓰는 TC는 Blocked)')),
+            h('td', { style: 'white-space:nowrap' }, h('div', { class: 'row' }, v, h('button', { class: 'btn small', type: 'button', onclick: () => v.value && saveOne(s.name, v.value) }, '저장'),
+              s.source === 'saved' ? confirmButton('삭제', async () => { const out = await guard(() => api('DELETE', `/api/secrets/${encodeURIComponent(s.name)}`)); if (out) { toast(`${s.name} 삭제했습니다`); draw(out); } }, 'btn small danger') : null)));
+        })))) : h('div', { class: 'sub' }, '아직 비밀값이 없습니다'),
+      h('div', { class: 'row' }, name, value, h('button', { class: 'btn', type: 'button', onclick: () => saveOne(name.value.trim(), value.value) }, '추가')));
+  };
+  draw(list);
+  return h('section', { class: 'card stack' },
+    h('h3', {}, '비밀값'),
+    h('div', { class: 'sub' }, '계정 비밀번호·토큰은 data/testdata.json에 {"secret": "이름"}으로만 적고, 값은 여기(data/state/secrets.json, Git 제외) 또는 같은 이름의 환경변수로 넣습니다. CI에서는 GitHub 저장소 Secrets에 같은 이름으로 넣으세요. 생성된 스크립트·리포트에는 값이 남지 않습니다.'),
+    body);
+}
+
+// ---------- 품질 지표 ----------
+async function renderMetrics() {
+  app().replaceChildren(h('section', { class: 'card' }, h('h2', {}, '품질 지표'), h('div', { class: 'sub' }, '계산 중…')));
+  const m = await guard(() => api('GET', '/api/metrics'));
+  if (!m) return;
+  const kpi = (t, n, cls, sub) => h('div', { class: 'kpi' }, h('div', { class: `n ${cls || ''}` }, n), h('div', { class: 't' }, t), sub ? h('div', { class: 'sub', style: 'font-size:11.5px' }, sub) : null);
+  const roi = m.roi;
+  const head = h('section', { class: 'card stack' },
+    h('div', {}, h('h2', {}, '품질 지표'), h('div', { class: 'sub' }, `최근 실행 ${roi.runs}회 · 실행 결과 ${roi.executed}건 기준`)),
+    h('div', { class: 'kpis' },
+      kpi('ROI (절감 ÷ 투자)', roi.ratio === null ? '-' : `${roi.ratio}배`, roi.ratio >= 1 ? 'ok' : 'warn', roi.ratio >= 1 ? '투자 회수함' : roi.runsToBreakEven === null ? '' : `지금 속도로 ${roi.runsToBreakEven}회 더 실행하면 회수`),
+      kpi('절감 시간', `${roi.savedHours}h`, '', `실행 1회당 ${roi.savedHoursPerRun}h`),
+      kpi('자동화 비율', pct(m.coverage.automatedRate), '', `${m.coverage.automated}/${m.coverage.tcs} TC`),
+      kpi('요구사항 커버리지', pct(m.coverage.reqRate), '', `${m.coverage.reqsAutomated}/${m.coverage.reqs} 요구사항`),
+      kpi('실패 대 결함', m.quality.failuresToDefects === null ? '-' : `${m.quality.failuresToDefects} : 1`, '', `Fail ${m.quality.failures}건 · BUG ${m.quality.bugs}건`)));
+
+  const maxMs = Math.max(1, ...m.trend.map((t) => t.durationMs));
+  const trendCard = h('section', { class: 'card stack' },
+    h('h3', {}, '실행 추세'),
+    m.trend.length ? h('div', {},
+      h('div', { class: 'sub' }, '막대 높이 = 통과율, 빨강 = 종료 기준 미충족. 막대를 누르면 그 실행으로 갑니다'),
+      h('div', { class: 'trend', role: 'img', 'aria-label': `최근 ${m.trend.length}회 통과율` }, m.trend.map((t) => h('a', {
+        class: `col${t.releasable ? '' : ' no'}`, href: '#dash', title: `${t.id} ${t.label} · 통과율 ${pct(t.passRate)} · ${fmtDur(t.durationMs)}`,
+        onclick: () => { S.dashRunId = t.id; },
+      }, h('i', { style: `height:${Math.max(2, (t.passRate || 0) * 100)}%` })))),
+      h('div', { class: 'sub', style: 'margin-top:6px' }, `최근 5회 평균 실행 시간 ${m.quality.avgRunMs ? fmtDur(m.quality.avgRunMs) : '-'} · 가장 긴 실행 ${fmtDur(maxMs)} · Flaky 비율 ${pct(m.quality.flakyRate)}`))
+      : h('div', { class: 'empty' }, '실행 기록이 없습니다'));
+
+  const stab = h('section', { class: 'card stack' },
+    h('h3', {}, 'TC별 판정 이력 (테스트 히스토그램)'),
+    h('div', { class: 'sub' }, '최근 20회. 초록 Pass · 빨강 Fail · 주황 Flaky. 불안정한 순서로 정렬했습니다. 자주 흔들리는 TC는 대기·식별자·데이터를 먼저 고치세요 (ISTQB CTAL-TAE 8.1.1)'),
+    m.stability.length ? h('div', { class: 'tbl' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['TC', '실행 단위', '최근 판정', 'Fail', 'Flaky', '불안정'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, m.stability.slice(0, 40).map((s) => h('tr', {},
+        h('td', {}, h('a', { class: 'mono', href: `#tcs/${encodeURIComponent(s.tcId)}` }, s.tcId), h('div', { class: 'sub' }, s.title)),
+        h('td', { class: 'mono' }, s.project),
+        h('td', {}, h('span', { class: 'hist', 'aria-label': s.recent.join(', ') }, s.recent.map((x) => h('i', { class: x, title: x })))),
+        h('td', { class: 'num' }, s.fail), h('td', { class: 'num' }, s.flaky),
+        h('td', { class: 'num' }, pct(s.unstable)))))))
+      : h('div', { class: 'empty' }, '이력이 없습니다'));
+
+  const inv = roi.investment;
+  const roiCard = h('section', { class: 'card stack' },
+    h('h3', {}, 'ROI 계산 (ISTQB CT-TAS 5.1)'),
+    h('div', { class: 'formula' }, `ROI = 절감 ÷ 투자 = ${roi.savedHours}h ÷ ${roi.investedHours}h = ${roi.ratio === null ? '-' : roi.ratio}
+
+절감 = Σ (TC 수동 실행 시간 − 자동 실행 시간)          = ${roi.savedHours}h
+투자 = 구축 ${inv.setup}h + TC 작성 ${inv.authoring}h + 스크립트 수정 ${inv.maintenance}h + 실패 분석 ${inv.analysis}h = ${roi.investedHours}h`),
+    roi.manualMissing ? h('div', { class: 'sub warn' }, `수동 실행 시간이 없는 자동화 TC ${roi.manualMissing}건은 기본값 ${roi.config.manualMinutesDefault}분으로 계산했습니다. TC 편집에서 실제 시간을 넣으세요`) : null,
+    h('div', { class: 'sub' }, '계산 기준은 설정 → ROI 계산 기준에서 바꿉니다. 프로젝트 기간이 회수 시점보다 짧으면 자동화하지 않는 편이 낫습니다.'));
+
+  const d = m.distribution;
+  const total = d.layers.ui + d.layers.api || 1;
+  const shapeName = { umbrella: '우산형 (UI 테스트에만 의존)', cone: '아이스크림콘형 (UI가 API보다 많음)', pyramid: '피라미드형에 가까움 (API가 UI 이상)' }[d.shape] || '-';
+  const distCard = h('section', { class: 'card stack' },
+    h('h3', {}, '테스트 분포 (ISTQB CT-TAS 3.1)'),
+    h('div', { class: 'shape', 'aria-label': `UI ${d.layers.ui}건, API ${d.layers.api}건` },
+      h('b', { class: 'ui', style: `width:${Math.max(18, (d.layers.ui / total) * 100)}%` }, `UI ${d.layers.ui}`),
+      h('b', { class: 'api', style: `width:${Math.max(18, (d.layers.api / total) * 100)}%` }, `API ${d.layers.api}`),
+      h('b', { class: 'unit', style: 'width:100%' }, '단위 테스트 (개발 저장소)')),
+    h('div', {}, `지금 모양: ${shapeName}`),
+    h('div', { class: 'sub' }, 'UI 테스트는 느리고 깨지기 쉬워 위로 갈수록 적게 두는 것이 목표입니다. 화면 사전 조건(계정·데이터 준비)을 API 스텝으로 옮기면 UI TC가 짧고 안정적이 됩니다.'),
+    Object.keys(d.assertKinds).length ? h('div', { class: 'sub' }, `확인 스텝 종류: ${Object.entries(d.assertKinds).map(([k, n]) => `${S.meta.actions[k] ? S.meta.actions[k].label : k} ${n}`).join(' · ')}`) : null);
+
+  const cov = m.coverage;
+  const covCard = h('section', { class: 'card stack' },
+    h('h3', {}, '커버리지'),
+    h('div', {}, `플랫폼별 자동화 TC: ${Object.entries(cov.platforms).map(([p, n]) => `${PL(p)} ${n}`).join(' · ') || '-'}`),
+    cov.reqsManualOnly.length ? h('div', { class: 'sub warn' }, `자동화 TC가 없는 요구사항 ${cov.reqsManualOnly.length}개: ${cov.reqsManualOnly.join(', ')}`) : h('div', { class: 'sub' }, '모든 요구사항에 자동화 TC가 있습니다'),
+    cov.withoutReq.length ? h('div', { class: 'sub' }, `요구사항 ID가 없는 자동화 TC ${cov.withoutReq.length}건: ${cov.withoutReq.join(', ')} (추적성을 위해 넣는 것을 권장)`) : null);
+
+  app().replaceChildren(head, h('div', { class: 'grid2' }, trendCard, roiCard), stab, h('div', { class: 'grid2' }, distCard, covCard));
 }
 
 // ---------- 요소 맵 ----------
@@ -1097,6 +1322,7 @@ async function renderElements() {
 
 // ---------- 기기 관리 ----------
 const GUIDES = {
+  api: ['API 주소는 설정 → 대상 사이트의 API 주소 (비우면 대상 사이트 주소)', 'API TC는 브라우저 없이 실행되어 UI 테스트보다 빠르고 안정적입니다', '응답 형식(스키마)은 data/schemas/<이름>.json에 JSON Schema로 둡니다'],
   pc: ['Chromium이 없으면 터미널에서 npx playwright install chromium 실행', '테스트 URL은 data/config.json의 baseURL'],
   mw: ['기기 프리셋은 data/config.json의 mw.devices (예: "Pixel 7", "iPhone 13")', 'iPhone 프리셋은 WebKit이 필요: npx playwright install webkit', '에뮬레이션은 실제 사파리·인앱 브라우저가 아니므로 핵심 TC는 실기기로 재확인'],
   android: [

@@ -1,0 +1,38 @@
+{
+  "id": "TC-API-001",
+  "title": "게시글 단건 조회 응답 형식",
+  "priority": "P1",
+  "automation": "적합",
+  "tags": [
+    "smoke",
+    "regression",
+    "api"
+  ],
+  "reqIds": [
+    "API-POST-01"
+  ],
+  "platforms": [
+    "api"
+  ],
+  "precondition": "jsonplaceholder 공개 API (예시)",
+  "manualMinutes": 3,
+  "steps": [
+    {
+      "action": "apiRequest",
+      "value": "GET /posts/1"
+    },
+    {
+      "action": "assertStatus",
+      "value": "200"
+    },
+    {
+      "action": "assertSchema",
+      "target": "post"
+    },
+    {
+      "action": "assertJson",
+      "target": "id",
+      "value": "1"
+    }
+  ]
+}

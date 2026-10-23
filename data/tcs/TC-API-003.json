@@ -1,0 +1,42 @@
+{
+  "id": "TC-API-003",
+  "title": "없는 게시글 조회 시 404",
+  "priority": "P2",
+  "automation": "적합",
+  "tags": [
+    "regression",
+    "api"
+  ],
+  "reqIds": [
+    "API-POST-01"
+  ],
+  "platforms": [
+    "api"
+  ],
+  "precondition": "",
+  "manualMinutes": 2,
+  "steps": [
+    {
+      "action": "apiRequest",
+      "value": "GET /posts/{{row.id}}"
+    },
+    {
+      "action": "assertStatus",
+      "value": "404"
+    }
+  ],
+  "dataSets": [
+    {
+      "name": "범위 밖 번호",
+      "values": {
+        "id": "9999"
+      }
+    },
+    {
+      "name": "0번",
+      "values": {
+        "id": "0"
+      }
+    }
+  ]
+}

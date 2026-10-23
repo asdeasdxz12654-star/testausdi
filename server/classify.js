@@ -17,6 +17,10 @@ function errorType(message) {
   if (!message) return 'UNKNOWN';
   if (/net::ERR_|ECONNREFUSED|ENOTFOUND|ECONNRESET|page\.goto: Timeout/i.test(message)) return 'NETWORK';
   if (/Target (page|crashed)|browser has been closed|Page crashed/i.test(message)) return 'CRASH';
+  if (/접근성 위반/.test(message)) return 'A11Y';
+  if (/snapshot doesn't exist|writing actual/i.test(message)) return 'BASELINE_MISSING';
+  if (/Screenshot comparison failed|pixels? \(ratio [\d.]+ of all image pixels\) (is|are) different|Expected an image/i.test(message)) return 'VISUAL_DIFF';
+  if (/비밀값 \S+이\(가\) 없습니다/.test(message)) return 'MISSING_SECRET';
   if (/strict mode violation/i.test(message)) return 'MULTIPLE_MATCH';
   if (/element\(s\) not found/i.test(message)) return 'ELEMENT_NOT_FOUND';
   if (/Timeout \d+ms exceeded/i.test(message) && /waiting for (locator|getBy|page\.getBy)/i.test(message)) return 'ELEMENT_NOT_FOUND';
@@ -39,8 +43,9 @@ function classify(result, others) {
   if (result.status === 'Flaky') return 'flaky';
   if (result.status !== 'Fail') return null;
   const type = result.errorType;
-  if (['NETWORK', 'TIMEOUT', 'DEVICE', 'APP_LAUNCH'].includes(type)) return 'env';
-  if (type === 'CRASH') return 'product';
+  if (['NETWORK', 'TIMEOUT', 'DEVICE', 'APP_LAUNCH', 'MISSING_SECRET'].includes(type)) return 'env';
+  if (type === 'CRASH' || type === 'A11Y') return 'product';
+  if (type === 'VISUAL_DIFF') return 'product_or_ui';
   if (type === 'ASSERTION_MISMATCH') return 'product';
   if (type === 'MULTIPLE_MATCH') return 'script';
   if (type === 'ELEMENT_NOT_FOUND') {
@@ -96,6 +101,8 @@ function defectDraft(result, ctx) {
     ...repro,
     `기대결과: ${expected}`,
     `실제결과: ${actualText(result)}`,
+    result.failedRow ? `데이터 행: ${result.failedRow} (${result.rows.filter((x) => x.status === 'Fail').length}/${result.rows.length}행 실패)` : null,
+    result.trace ? `추적 ID: ${result.trace} (요청 헤더 x-autotc-trace, 서버 로그 검색용)` : null,
     `재현율: ${failedAttempts}/${result.attempts.length} (자동 재시도 포함)`,
     `첨부: ${files.length ? files.join(', ') : '-'}`,
     passedElsewhere.length ? `참고: 같은 TC가 ${passedElsewhere.join(' · ')}에서는 Pass` : null,

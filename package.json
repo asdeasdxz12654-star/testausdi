@@ -2,19 +2,21 @@
   "name": "autotc",
   "version": "0.1.0",
   "private": true,
-  "description": "매뉴얼 TC를 PC 웹·MW·안드로이드·아이폰에서 실행하는 테스트 자동화 실행기",
+  "description": "매뉴얼 TC를 PC 웹·MW·API·안드로이드·아이폰에서 실행하는 테스트 자동화 실행기",
   "main": "server/index.js",
   "scripts": {
     "start": "node scripts/start.js",
     "ci": "node scripts/ci.js",
     "test": "node --test \"test/**/*.test.js\"",
-    "build:exe": "node scripts/build-exe.js"
+    "build:exe": "node scripts/build-exe.js",
+    "scan:secrets": "node scripts/secret-scan.js"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.132.0",
+    "@axe-core/playwright": "4.13.0",
     "@playwright/test": "1.64.0",
     "exceljs": "4.4.0"
   },

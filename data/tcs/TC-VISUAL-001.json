@@ -1,0 +1,32 @@
+{
+  "id": "TC-VISUAL-001",
+  "title": "로그인 화면 시각적 회귀",
+  "priority": "P3",
+  "automation": "적합",
+  "tags": [
+    "visual"
+  ],
+  "reqIds": [
+    "LGN-01"
+  ],
+  "platforms": [
+    "pc",
+    "mw"
+  ],
+  "precondition": "기준 이미지는 OS별로 data/baselines에 저장",
+  "manualMinutes": 2,
+  "steps": [
+    {
+      "action": "open",
+      "target": "screen.login"
+    },
+    {
+      "action": "assertVisible",
+      "target": "login.submit"
+    },
+    {
+      "action": "assertScreenshot",
+      "value": "login-default"
+    }
+  ]
+}
