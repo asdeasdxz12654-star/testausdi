@@ -11,6 +11,9 @@ const ai = require('./ai');
 const { expandSteps, describeStep } = require('./tc');
 const { ACTIONS } = require('./actions');
 const { splitLines } = require('./importer');
+const materials = require('./materials');
+
+const { MEDIA } = materials;
 
 const DIR = () => path.join(P.STATE, 'mapping');
 const projDir = (id) => { store.assertId(id, '매핑 ID'); return path.join(DIR(), id); };
@@ -66,70 +69,26 @@ function updateProject(id, patch) {
   return p;
 }
 
-// ---- 자료 ----
-const SPEC_KINDS = { '.pdf': 'pdf', '.png': 'image', '.jpg': 'image', '.jpeg': 'image', '.webp': 'image', '.txt': 'text', '.md': 'text' };
-const MEDIA = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.pdf': 'application/pdf' };
-
-function nextId(list, prefix) {
-  const n = list.reduce((m, x) => Math.max(m, Number(String(x.id).slice(prefix.length)) || 0), 0);
-  return `${prefix}${n + 1}`;
-}
-
-function addFile(id, { kind, fileName, data }) {
+// ---- 자료 (materials.js) ----
+function addFile(id, file) {
   const p = getProject(id);
   if (running && running.id === id) throw new HttpError(409, '분석이 끝난 뒤 자료를 바꿀 수 있습니다');
-  const ext = path.extname(fileName || '').toLowerCase();
-  const buf = Buffer.from(data || '', 'base64');
-  if (!buf.length) throw new HttpError(400, '빈 파일입니다');
-  if (kind === 'spec') {
-    if (!SPEC_KINDS[ext]) throw new HttpError(400, '기획서는 PDF, 이미지(PNG/JPG/WEBP), 텍스트(.txt/.md)만 올릴 수 있습니다. PPT·워드는 PDF로 저장해 올려 주세요');
-    if (ext === '.pdf' && buf.length > 30 * 1024 * 1024) throw new HttpError(400, 'PDF가 너무 큽니다 (최대 30MB)');
-    const sid = nextId(p.specs, 'S');
-    const file = `specs/${sid}${ext}`;
-    fs.mkdirSync(path.join(projDir(id), 'specs'), { recursive: true });
-    fs.writeFileSync(path.join(projDir(id), file), buf);
-    const spec = { id: sid, name: fileName, kind: SPEC_KINDS[ext], file, size: buf.length };
-    if (spec.kind === 'text') spec.text = buf.toString('utf8');
-    p.specs.push(spec);
-  } else if (kind === 'frame') {
-    if (!MEDIA[ext] || ext === '.pdf') throw new HttpError(400, '디자인은 프레임을 PNG/JPG/WEBP로 내보내 올려 주세요');
-    if (buf.length > 5 * 1024 * 1024) throw new HttpError(400, '이미지가 너무 큽니다 (최대 5MB). 피그마에서 1x로 내보내 주세요');
-    const fid = nextId(p.frames, 'F');
-    const file = `frames/${fid}${ext}`;
-    fs.mkdirSync(path.join(projDir(id), 'frames'), { recursive: true });
-    fs.writeFileSync(path.join(projDir(id), file), buf);
-    p.frames.push({ id: fid, name: path.basename(fileName, ext), file, source: 'upload', texts: null });
-  } else {
-    throw new HttpError(400, 'kind는 spec 또는 frame이어야 합니다');
-  }
+  materials.addFile(projDir(id), p, file);
   saveProject(p);
   return p;
 }
 
 async function addFigma(id, url, deps = {}) {
   const p = getProject(id);
-  const figma = deps.figma || require('./figma');
-  const got = await figma.fetchFrames(url, ai.getSettings().figmaToken, deps.figmaOptions);
-  fs.mkdirSync(path.join(projDir(id), 'frames'), { recursive: true });
-  for (const f of got.frames) {
-    const fid = nextId(p.frames, 'F');
-    const file = `frames/${fid}.png`;
-    fs.writeFileSync(path.join(projDir(id), file), f.png);
-    p.frames.push({ id: fid, name: f.name, file, source: 'figma', figmaId: f.figmaId, width: f.width, height: f.height, texts: f.texts, nodes: f.nodes || [] });
-  }
-  p.figma = { url: String(url).trim(), fileKey: got.fileKey };
+  const got = await materials.addFigma(projDir(id), p, url, { figma: deps.figma, token: ai.getSettings().figmaToken, figmaOptions: deps.figmaOptions });
   saveProject(p);
-  return { project: p, added: got.frames.length, skipped: got.skipped };
+  return { project: p, ...got };
 }
 
 function removeFile(id, fileId) {
   const p = getProject(id);
   if (running && running.id === id) throw new HttpError(409, '분석이 끝난 뒤 자료를 바꿀 수 있습니다');
-  const list = fileId.startsWith('S') ? p.specs : p.frames;
-  const item = list.find((x) => x.id === fileId);
-  if (!item) throw new HttpError(404, `자료를 찾을 수 없습니다: ${fileId}`);
-  list.splice(list.indexOf(item), 1);
-  fs.rmSync(path.join(projDir(id), item.file), { force: true });
+  materials.removeFile(projDir(id), p, fileId);
   if (fileId.startsWith('F')) delete p.inventory[fileId];
   saveProject(p);
   return p;

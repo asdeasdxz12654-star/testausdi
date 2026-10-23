@@ -15,6 +15,7 @@ const runner = require('./runner');
 const importer = require('./importer');
 const ai = require('./ai');
 const mapping = require('./mapping');
+const tcgen = require('./generate');
 const settings = require('./settings');
 const secrets = require('./secrets');
 const metrics = require('./metrics');
@@ -294,6 +295,23 @@ route('POST', '/api/mapping/:id/claude-code/import', ({ id }) => mapping.importC
 route('PUT', '/api/mapping/:id/results/:tcId', ({ id, tcId }, body) => mapping.review(id, tcId, body));
 route('POST', '/api/mapping/:id/apply', ({ id }) => mapping.apply(id));
 
+route('GET', '/api/generate', () => tcgen.listProjects());
+route('POST', '/api/generate', (_, body) => tcgen.createProject(body.name));
+route('GET', '/api/generate/:id', ({ id }) => tcgen.view(id));
+route('PUT', '/api/generate/:id', ({ id }, body) => tcgen.updateProject(id, body));
+route('DELETE', '/api/generate/:id', ({ id }) => { tcgen.deleteProject(id); return { ok: true }; });
+route('POST', '/api/generate/:id/files', ({ id }, body) => tcgen.addFile(id, body));
+route('DELETE', '/api/generate/:id/files/:fileId', ({ id, fileId }) => tcgen.removeFile(id, fileId));
+route('POST', '/api/generate/:id/figma', ({ id }, body) => tcgen.addFigma(id, body.url));
+route('POST', '/api/generate/:id/rules/conditions', ({ id }) => tcgen.rulesConditions(id));
+route('POST', '/api/generate/:id/rules/drafts', ({ id }) => tcgen.rulesDrafts(id));
+route('POST', '/api/generate/:id/claude-code/export', ({ id }, body) => tcgen.exportForClaudeCode(id, body));
+route('POST', '/api/generate/:id/claude-code/import', ({ id }) => tcgen.importClaudeCode(id));
+route('POST', '/api/generate/:id/conditions/review', ({ id }, body) => tcgen.reviewConditions(id, body));
+route('PUT', '/api/generate/:id/conditions/:cid', ({ id, cid }, body) => tcgen.reviewCondition(id, cid, body));
+route('PUT', '/api/generate/:id/drafts/:did', ({ id, did }, body) => tcgen.reviewDraft(id, did, body));
+route('POST', '/api/generate/:id/apply', ({ id }) => tcgen.apply(id));
+
 route('GET', '/api/issues', () => store.getIssues());
 route('PUT', '/api/issues/:id', ({ id }, body) => {
   const issues = store.getIssues();
@@ -314,9 +332,8 @@ async function handle(req, res) {
     const m = pathname.match(r.re);
     const params = Object.fromEntries(r.keys.map((k, i) => [k, m[i + 1]]));
     try {
-      // 엑셀 업로드는 base64로 오므로 한도를 늘린다
       // 엑셀·기획서·디자인 업로드는 base64로 오므로 한도를 늘린다
-      const big = pathname.startsWith('/api/import/') || /^\/api\/mapping\/[^/]+\/files$/.test(pathname);
+      const big = pathname.startsWith('/api/import/') || /^\/api\/(mapping|generate)\/[^/]+\/files$/.test(pathname);
       const body = req.method === 'GET' ? {} : await readBody(req, big ? 45 : 2);
       const data = await r.handler(params, body, url);
       if (data && data.download) {
@@ -336,6 +353,7 @@ async function handle(req, res) {
   if (req.method !== 'GET') return sendJson(res, 405, { error: '허용되지 않는 요청입니다' });
   if (pathname.startsWith('/files/')) return sendFile(res, P.RUNS, pathname.slice('/files/'.length));
   if (pathname.startsWith('/baselines/')) return sendFile(res, path.join(P.DATA, 'baselines'), pathname.slice('/baselines/'.length));
+  if (pathname.startsWith('/generate-files/')) return sendFile(res, path.join(P.STATE, 'generate'), pathname.slice('/generate-files/'.length));
   if (pathname.startsWith('/mapping-files/')) return sendFile(res, path.join(P.STATE, 'mapping'), pathname.slice('/mapping-files/'.length));
   return sendFile(res, P.WEB, pathname === '/' ? 'index.html' : pathname.slice(1));
 }

@@ -197,3 +197,24 @@ td input[type=text], td select { width: 100%; }
 .diffs img { width: 100%; border: 1px solid var(--line); border-radius: 6px; }
 textarea.mono { width: 100%; }
 .checks.a11y li { grid-template-columns: 64px 150px minmax(0, 1fr); }
+
+/* TC 자동 작성 */
+.stepper { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; counter-reset: none; }
+.stepper li a { display: grid; gap: 2px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--fg); text-decoration: none; background: var(--surface); height: 100%; }
+.stepper li a:hover { border-color: var(--accent); }
+.stepper li.done a { border-color: var(--accent); background: var(--accent-soft); }
+@media (max-width: 760px) { .stepper { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.form-box { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+.cond-tbl td { vertical-align: top; }
+.cond-tbl select { max-width: 110px; }
+.sub.quote { display: block; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+tr.dim td, .draft.dim { opacity: 0.6; }
+.linkish { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font-size: inherit; }
+.draft { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: grid; gap: 8px; background: var(--surface); }
+.draft.applied { border-style: dashed; }
+.plain-steps { margin: 0; padding-left: 22px; display: grid; gap: 3px; font-size: 13.5px; }
+.srcbox { margin: 0; padding: 8px 10px; background: var(--code-bg); border-radius: 6px; white-space: pre-wrap; font-size: 12.5px; font-family: var(--font-body); }
+.notes { margin: 0; padding-left: 18px; }
+.gen-form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.gen-form .wide { grid-column: 1 / -1; }
+@media (max-width: 900px) { .gen-form { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }

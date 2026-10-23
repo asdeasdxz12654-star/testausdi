@@ -136,7 +136,7 @@ async function route() {
     if (active) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   });
   if (v !== 'mapping') { clearInterval(S.mapPoll); S.mapPoll = null; }
-  const views = { dash: renderDash, tcs: () => renderTcs(rest[0]), import: renderImport, mapping: () => renderMapping(rest[0]), settings: renderSettings, elements: renderElements, devices: renderDevices, issues: renderIssues, metrics: renderMetrics, result: () => renderResult(rest[0], rest[1]) };
+  const views = { dash: renderDash, tcs: () => renderTcs(rest[0]), import: renderImport, mapping: () => renderMapping(rest[0]), generate: () => renderGenerate(rest[0]), settings: renderSettings, elements: renderElements, devices: renderDevices, issues: renderIssues, metrics: renderMetrics, result: () => renderResult(rest[0], rest[1]) };
   await (views[v] || renderDash)();
 }
 
@@ -995,6 +995,339 @@ function reviewCard(v, refresh) {
           renderMapping(pid);
         } }, `승인한 ${approvedCount}건 반영`))),
     h('div', { class: 'map3' }, list, frameView, detail));
+}
+
+// ---------- TC 자동 작성 ----------
+// ① 자료·범위 → ② 테스트 조건(검토) → ③ TC 초안(검토) → ④ 반영. 한 화면에 위에서 아래로 둔다
+const TECH = { EP: '동등 분할', BVA: '경계값', DT: '결정표', ST: '상태 전이', EG: '오류 추정', UC: '유스케이스' };
+const CTYPE = { positive: '정상', negative: '예외', boundary: '경계', permission: '권한', exception: '오류 처리' };
+const GEN_REVIEW = { pending: ['s-Blocked', '검토 대기'], approved: ['s-Pass', '승인'], inquiry: ['s-Flaky', '기획 문의'], rejected: ['s-Fail', '제외'] };
+const GEN_METHOD = { rules: '규칙 기반', 'claude-code': 'Claude Code' };
+const RUNNABLE = { ok: ['s-Pass', '실행 가능'], 'needs-locator': ['s-Flaky', '식별자 필요'], invalid: ['s-Fail', '스텝 오류'], manual: ['s-Blocked', '스텝 직접 작성'] };
+const EVID = { verified: ['s-Pass', '근거 원문 확인'], unverified: ['s-Flaky', '근거 대조 불가(PDF·이미지)'], form: ['s-Blocked', '근거: 조건표'], none: ['s-none', '근거 없음'] };
+const tag = ([cls, text], title) => h('span', { class: `pill ${cls}`, title }, text);
+const techLabel = (t) => String(t || '').split('+').map((x) => TECH[x] || x).join('+');
+
+async function renderGenerate(pid) {
+  if (!pid) return renderGenerateList();
+  const v = await guard(() => api('GET', `/api/generate/${pid}`));
+  if (!v) { location.hash = '#generate'; return; }
+  S.gen = S.gen && S.gen.id === pid ? Object.assign(S.gen, { v }) : { id: pid, v, filter: 'all' };
+  drawGenerate();
+}
+
+async function renderGenerateList() {
+  const list = await api('GET', '/api/generate');
+  const nameIn = h('input', { type: 'text', id: 'genName', placeholder: '예: 회원가입 v2.1 · 결제 정보 입력', style: 'flex:1;min-width:0' });
+  app().replaceChildren(h('section', { class: 'card stack' },
+    h('div', {}, h('h2', {}, 'TC 자동 작성'),
+      h('div', { class: 'sub' }, '기획서·화면·입력 조건표에서 테스트 조건을 먼저 뽑아 검토하고, 승인한 조건만 TC 초안으로 만듭니다. 근거 인용은 원문과 대조하고, QA가 승인한 초안만 TC로 저장합니다.')),
+    h('form', { class: 'row', onsubmit: async (e) => { e.preventDefault(); const p = await guard(() => api('POST', '/api/generate', { name: nameIn.value })); if (p) location.hash = `#generate/${p.id}`; } },
+      nameIn, h('button', { class: 'btn primary', type: 'submit' }, '새로 만들기')),
+    list.length ? h('div', { class: 'tbl' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['이름', '기획서', '화면', '조건', '초안', '반영'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, list.map((p) => h('tr', { class: 'clickable', tabindex: '0', onclick: () => { location.hash = `#generate/${p.id}`; }, onkeydown: (e) => { if (e.key === 'Enter') location.hash = `#generate/${p.id}`; } },
+        h('td', {}, p.name), h('td', { class: 'num' }, p.specs), h('td', { class: 'num' }, p.frames), h('td', { class: 'num' }, p.conditions), h('td', { class: 'num' }, p.drafts), h('td', { class: 'num' }, p.applied))))))
+      : h('div', { class: 'empty' }, '아직 없습니다. 이름을 넣고 새로 만드세요.'),
+    h('div', { class: 'guide' }, h('b', {}, '작성 방법 두 가지'), h('ol', {},
+      h('li', {}, '규칙 기반(무료): 입력 조건표로 동등 분할·경계값 TC와 데이터 행을 만들고, 텍스트 기획서에서 조건 문장과 모호한 문장을 찾습니다.'),
+      h('li', {}, 'Claude Code(구독 안에서): 요청 파일을 만들어 Claude Code 대화창에 맡깁니다. PDF·이미지 기획서와 화면도 읽습니다. 고객사 자료는 외부 AI 전송이 허용되는지 먼저 확인하세요.')))));
+}
+
+function drawGenerate() {
+  const { v } = S.gen;
+  const pid = v.id;
+  const refresh = (nv) => { if (nv) { S.gen.v = nv; drawGenerate(); } };
+  // 화면에서 고친 설정을 먼저 저장하고 동작한다 (저장 버튼을 누르지 않아도 조건·초안이 최신 설정으로 만들어지게)
+  const save = async () => {
+    if (!S.gen.collect) return true;
+    const nv = await guard(() => api('PUT', `/api/generate/${pid}`, S.gen.collect()));
+    if (nv) S.gen.v = nv;
+    return !!nv;
+  };
+  const call = async (method, url, body, msg, saveFirst) => {
+    if (saveFirst && !(await save())) return null;
+    const nv = await guard(() => api(method, `/api/generate/${pid}${url}`, body));
+    if (nv && msg) toast(typeof msg === 'function' ? msg(nv) : msg);
+    refresh(nv);
+    return nv;
+  };
+  const y = window.scrollY;
+  app().replaceChildren(genHeader(v), genMaterials(v, call, save), genConditions(v, call), genDrafts(v, call), genApply(v, call));
+  window.scrollTo(0, y);
+}
+
+function genHeader(v) {
+  const approvedC = v.conditions.filter((c) => c.review.status === 'approved').length;
+  const approvedD = v.drafts.filter((d) => d.review.status === 'approved').length;
+  const applied = v.drafts.filter((d) => d.appliedAs).length;
+  const steps = [
+    ['자료·범위', `기획서 ${v.specs.length} · 화면 ${v.frames.length}${v.formState.fields ? ` · 조건표 ${v.formState.fields}필드` : ''}`, v.specs.length + v.frames.length + v.formState.fields > 0],
+    ['테스트 조건', v.conditions.length ? `${v.conditions.length}개 · 승인 ${approvedC}` : '아직 없음', approvedC > 0],
+    ['TC 초안', v.drafts.length ? `${v.drafts.length}건 · 승인 ${approvedD}` : '아직 없음', approvedD > 0],
+    ['반영', applied ? `TC ${applied}건 저장됨` : '아직 없음', applied > 0],
+  ];
+  return h('section', { class: 'card stack' },
+    h('div', { class: 'row between' }, h('div', {}, h('a', { href: '#generate' }, '← 목록'), h('h2', {}, v.name)),
+      v.lastRun ? h('span', { class: 'sub' }, `최근: ${GEN_METHOD[v.lastRun.method]} · ${v.lastRun.stage === 'conditions' ? '조건' : '초안'} · ${fmtTime(v.lastRun.at)}`) : null),
+    h('ol', { class: 'stepper' }, steps.map(([t, d, done], i) => h('li', { class: done ? 'done' : '' },
+      h('a', { href: `#generate/${v.id}`, onclick: (e) => { e.preventDefault(); document.getElementById(`gen-s${i + 1}`).scrollIntoView({ behavior: 'smooth', block: 'start' }); } },
+        h('b', {}, `${i + 1}. ${t}`), h('span', { class: 'sub' }, d))))),
+    v.lastRun && v.lastRun.warnings.length ? h('div', { class: 'errbox' }, v.lastRun.warnings.slice(0, 8).join('\n')) : null);
+}
+
+function genMaterials(v, call, save) {
+  const pid = v.id;
+  const f = v.form;
+  const specInput = h('input', { type: 'file', id: 'genSpecFiles', multiple: true, hidden: true, accept: '.pdf,.png,.jpg,.jpeg,.webp,.txt,.md' });
+  const frameInput = h('input', { type: 'file', id: 'genFrameFiles', multiple: true, hidden: true, accept: '.png,.jpg,.jpeg,.webp' });
+  const upload = (kind) => async (e) => {
+    if (!(await save())) return;
+    for (const file of [...e.target.files]) {
+      toast(`${file.name} 올리는 중…`);
+      const data = await readFileB64(file).catch((err) => { toast(err.message, true); return null; });
+      if (data) await call('POST', '/files', { kind, fileName: file.name, data });
+    }
+  };
+  specInput.addEventListener('change', upload('spec'));
+  frameInput.addEventListener('change', upload('frame'));
+  const del = (fid) => h('button', { class: 'icon-btn', type: 'button', 'aria-label': '삭제', title: '삭제', onclick: async () => { if (await save()) call('DELETE', `/files/${fid}`); } }, '✕');
+  const figmaIn = h('input', { type: 'text', id: 'genFigma', placeholder: 'https://www.figma.com/design/...?node-id=...', value: v.figma ? v.figma.url : '', style: 'flex:1;min-width:0' });
+
+  // 범위
+  const chosen = new Set(v.scope.sections);
+  const secBox = h('div', { class: 'tc-pick', style: 'max-height:220px' }, v.sections.map((sec) => h('label', { class: 'check' },
+    h('input', { type: 'checkbox', value: sec.key, checked: chosen.has(sec.key) }),
+    h('span', { class: 'mono sub' }, sec.spec), h('span', {}, sec.title, h('span', { class: 'sub' }, ` · ${sec.chars}자`)))));
+  const noteIn = h('textarea', { id: 'genScopeNote', rows: 2, placeholder: '이번에 다룰 기능 (예: 결제 정보 입력 화면의 입력 검증만. PDF 기획서는 이 설명으로 범위를 정합니다)' }, v.scope.note);
+
+  // 입력 조건표
+  const keys = (o) => Object.keys(o || {});
+  const lists = [h('datalist', { id: 'gen-el' }, keys(S.elements.elements).map((k) => h('option', { value: k }, S.elements.elements[k].label))),
+    h('datalist', { id: 'gen-sc' }, keys(S.elements.screens).map((k) => h('option', { value: k }, S.elements.screens[k].label)))];
+  const inp = (id, value, ph, list) => h('input', { type: 'text', id, value: value || '', placeholder: ph, list, autocomplete: 'off' });
+  const fName = inp('genFormName', f.name, '예: 결제 정보 입력');
+  const fFlow = h('select', { id: 'genFlow' }, h('option', { value: '' }, '(없음)'), keys(S.flows).map((k) => h('option', { value: k, selected: k === f.flow }, `${S.flows[k].label} · ${k}`)));
+  const fScreen = inp('genScreen', f.screen, 'screen.signup', 'gen-sc');
+  const fSubmit = inp('genSubmit', f.submit, 'signup.submit', 'gen-el');
+  const fError = inp('genError', f.error, 'signup.error', 'gen-el');
+  const fKind = h('select', { id: 'genSuccKind' }, [['visible', '요소 노출'], ['url', '주소 포함'], ['text', '요소 문구']].map(([k, t]) => h('option', { value: k, selected: k === f.success.kind }, t)));
+  const fTarget = inp('genSuccTarget', f.success.target, '요소 (예: signup.done)', 'gen-el');
+  const fValue = inp('genSuccValue', f.success.value, '주소 조각 또는 문구');
+  const fPrio = h('select', { id: 'genPrio' }, ['P1', 'P2', 'P3'].map((x) => h('option', { value: x, selected: x === f.priority }, x)));
+  const plats = Object.keys(S.meta.platformLabels).map((p) => h('label', { class: 'check' }, h('input', { type: 'checkbox', value: p, checked: f.platforms.includes(p) }), PL(p)));
+  const fText = h('textarea', { id: 'genFormText', class: 'mono', rows: 6, placeholder: `${v.formHeader}\n이메일\tsignup.email\t이메일\tY\t\t50\t\t이메일을 입력하세요\t이메일 형식이 아닙니다\t` }, f.text);
+  const fPre = inp('genPre', f.precondition, '예: 로그인 상태');
+  const prefixIn = inp('genPrefix', v.idPrefix, 'TC-GEN-');
+  const exSel = [0, 1].map((i) => h('select', { 'aria-label': `팀 TC 예시 ${i + 1}` }, h('option', { value: '' }, i ? '(없음)' : '(자동으로 고름)'),
+    S.tcs.filter((t) => t.automation !== '수동 유지').map((t) => h('option', { value: t.id, selected: v.examples[i] === t.id }, `${t.id} ${t.title}`))));
+
+  S.gen.collect = () => ({
+    scope: { sections: [...secBox.querySelectorAll('input:checked')].map((i) => i.value), note: noteIn.value },
+    form: { name: fName.value, text: fText.value, flow: fFlow.value, screen: fScreen.value, submit: fSubmit.value, error: fError.value,
+      success: { kind: fKind.value, target: fTarget.value, value: fValue.value }, priority: fPrio.value, precondition: fPre.value,
+      platforms: plats.map((l) => l.querySelector('input')).filter((i) => i.checked).map((i) => i.value) },
+    idPrefix: prefixIn.value, examples: exSel.map((s) => s.value).filter(Boolean),
+  });
+  const fst = v.formState;
+  const newEls = Object.entries(fst.newElements);
+  return h('section', { class: 'card stack', id: 'gen-s1' },
+    h('h3', {}, '① 자료·범위'),
+    h('div', { class: 'grid2' },
+      h('div', { class: 'stack' },
+        h('div', { class: 'row between' }, h('b', {}, `기획서 ${v.specs.length}개`), h('label', { class: 'btn small', for: 'genSpecFiles' }, '기획서 올리기'), specInput),
+        h('div', { class: 'sub' }, '텍스트(.txt/.md)는 "# 제목"으로 절을 나눠 범위를 고를 수 있고, 인용을 원문과 대조합니다. PDF·이미지는 Claude Code로만 읽습니다.'),
+        v.specs.length ? h('ul', { class: 'checks' }, v.specs.map((s) => h('li', { style: 'grid-template-columns:28px minmax(0,1fr) auto' }, h('span', { class: 'mono sub' }, s.id), h('span', {}, s.name, h('span', { class: 'sub' }, ` · ${s.kind}`)), del(s.id)))) : null,
+        v.sections.length ? h('div', { class: 'stack', style: 'gap:6px' }, h('div', { class: 'sub' }, `범위: 다룰 절을 고르세요 (고르지 않으면 전체). 한 번에 한 기능씩 나눠야 결과가 정확합니다.`), secBox) : null,
+        h('label', { class: 'field' }, '범위 설명', noteIn)),
+      h('div', { class: 'stack' },
+        h('div', { class: 'row between' }, h('b', {}, `화면 ${v.frames.length}개`), h('label', { class: 'btn small', for: 'genFrameFiles' }, '캡처 올리기'), frameInput),
+        h('form', { class: 'row', onsubmit: async (e) => { e.preventDefault(); if (!(await save())) return; toast('피그마에서 프레임을 가져오는 중…'); await call('POST', '/figma', { url: figmaIn.value }, (nv) => `프레임 ${nv.added}개를 가져왔습니다`); } },
+          figmaIn, h('button', { class: 'btn small', type: 'submit' }, '피그마에서 가져오기')),
+        v.frames.length ? h('div', { class: 'thumbs' }, v.frames.map((fr) => h('figure', {},
+          h('img', { src: `/generate-files/${pid}/${fr.file}`, alt: fr.name, loading: 'lazy' }),
+          h('figcaption', { class: 'row between' }, h('span', {}, h('span', { class: 'mono sub' }, `${fr.id} `), fr.name), del(fr.id))))) : h('div', { class: 'sub' }, '화면은 Claude Code 요청에 함께 넣습니다. 에러·팝업 같은 상태 화면도 넣으세요.'))),
+    h('div', { class: 'stack form-box' },
+      h('div', { class: 'row between' }, h('b', {}, '입력 조건표 (선택)'),
+        h('button', { class: 'btn small', type: 'button', onclick: () => { if (!fText.value.trim()) fText.value = `${v.formHeader}\n`; else if (!fText.value.startsWith('필드')) fText.value = `${v.formHeader}\n${fText.value}`; fText.focus(); } }, '머리글 넣기')),
+      h('div', { class: 'sub' }, '입력 폼의 필드 규칙을 적으면 동등 분할·경계값(최소-1, 최소, 최대, 최대+1) 조건과 데이터 행 TC를 만듭니다. 엑셀에서 표를 복사해 붙여넣어도 됩니다. 요소 맵에 없는 이름은 새 요소로 추가됩니다.'),
+      h('div', { class: 'gen-form' },
+        h('label', { class: 'field' }, '폼 이름', fName), h('label', { class: 'field' }, '진입: 공통 흐름', fFlow),
+        h('label', { class: 'field' }, '진입: 화면', fScreen), h('label', { class: 'field' }, '우선순위(정상 제출)', fPrio),
+        h('label', { class: 'field' }, '제출 버튼', fSubmit), h('label', { class: 'field' }, '오류 문구 요소', fError),
+        h('label', { class: 'field' }, '성공 확인 방법', fKind), h('label', { class: 'field' }, '성공 확인 요소', fTarget),
+        h('label', { class: 'field' }, '성공 확인 주소 조각·문구', fValue),
+        h('label', { class: 'field wide' }, '사전조건', fPre),
+        h('div', { class: 'wide row' }, h('span', { class: 'sub' }, '플랫폼'), plats),
+        h('label', { class: 'field wide' }, '조건표', fText)),
+      fst.errors.length && f.text.trim() ? h('div', { class: 'errbox' }, fst.errors.join('\n')) : null,
+      newEls.length ? h('div', { class: 'notice' }, `요소 맵에 없어 새로 만들 요소 ${newEls.length}개: ${newEls.map(([k, e]) => `${k}(${e.label})`).join(', ')} — 반영 후 요소 맵에서 식별자를 채웁니다`) : null),
+    h('div', { class: 'row' },
+      h('label', { class: 'field' }, 'TC ID 접두어', prefixIn),
+      h('label', { class: 'field' }, '팀 TC 예시 1 (Claude Code 형식 맞춤)', exSel[0]),
+      h('label', { class: 'field' }, '팀 TC 예시 2', exSel[1]),
+      h('button', { class: 'btn primary', type: 'button', style: 'align-self:end', onclick: async () => { if (await save()) { toast('저장했습니다'); drawGenerate(); } } }, '저장')),
+    lists);
+}
+
+function genModes(v, call, stage) {
+  const cc = v.claudeCode && v.claudeCode.stage === stage ? v.claudeCode : null;
+  const ruleUrl = stage === 'conditions' ? '/rules/conditions' : '/rules/drafts';
+  const mode = (title, cost, desc, button) => h('div', { class: 'mode' }, h('div', { class: 'row between' }, h('b', {}, title), h('span', { class: 'pill s-Pass' }, cost)), h('div', { class: 'sub' }, desc), h('div', { class: 'row' }, button));
+  return h('div', { class: 'stack' },
+    h('div', { class: 'modes', style: 'grid-template-columns:repeat(2,minmax(0,1fr))' },
+      mode('규칙 기반', '무료', stage === 'conditions'
+        ? '입력 조건표로 동등 분할·경계값 조건을, 텍스트 기획서에서 "~시·~경우·~하면·이상·최대" 같은 조건 문장과 모호한 문장(기획 문의)을 뽑습니다.'
+        : '승인한 조건표 조건은 실행 가능한 TC와 데이터 행으로, 기획서 조건은 원문만 있는 초안으로 만듭니다.',
+      h('button', { class: 'btn primary', type: 'button', onclick: () => call('POST', ruleUrl, null, stage === 'conditions' ? (nv) => `조건 ${nv.conditions.length}개` : (nv) => `초안 ${nv.drafts.length}건`, true) }, stage === 'conditions' ? '조건 뽑기' : 'TC 초안 만들기')),
+      mode('Claude Code', '구독 안에서', stage === 'conditions'
+        ? '범위 안의 기획서·화면을 읽고 기법(EP·BVA·결정표·상태 전이·오류 추정)별 조건과 기획 문의를 찾습니다. PDF·이미지도 읽습니다.'
+        : '승인한 조건만 넘겨 TC 초안을 만듭니다. 팀 TC 예시 형식을 따르고, 스텝이 틀리면 AutoTC가 자연어 절차에서 다시 변환합니다.',
+      h('button', { class: 'btn', type: 'button', onclick: () => call('POST', '/claude-code/export', { stage }, 'Claude Code 요청 파일을 만들었습니다', true) }, '요청 파일 만들기'))),
+    cc ? h('div', { class: 'notice stack' },
+      h('b', {}, `Claude Code 요청 · ${stage === 'conditions' ? '1단계 조건' : `2단계 초안 (조건 ${cc.conditionIds.length}개)`} · ${fmtTime(cc.at)}`),
+      h('div', {}, 'Claude Code 대화창에 아래 문장을 붙여넣으세요. 끝나면 "응답 가져오기"를 누릅니다.'),
+      h('pre', { style: 'white-space:pre-wrap' }, v.prompt),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn small', type: 'button', onclick: () => copyText(v.prompt) }, '요청 문장 복사'),
+        h('button', { class: 'btn small primary', type: 'button', onclick: () => call('POST', '/claude-code/import', null, (nv) => `${nv.imported}건을 가져왔습니다`) }, '응답 가져오기'))) : null);
+}
+
+function genConditions(v, call) {
+  const put = (c, body, msg) => call('PUT', `/conditions/${c.id}`, body, msg);
+  const filter = S.gen.filter;
+  const shown = v.conditions.filter((c) => filter === 'all' || (filter === 'open' ? c.review.status === 'pending' : filter === 'approved' ? c.review.status === 'approved' : ['rejected', 'inquiry'].includes(c.review.status)));
+  const pending = v.conditions.filter((c) => c.review.status === 'pending').length;
+  const sel = (options, value, onchange, label) => h('select', { 'aria-label': label, onchange }, Object.entries(options).map(([k, t]) => h('option', { value: k, selected: k === value }, t)));
+  const evidenceCell = (c) => {
+    const ev = c.evidence || [];
+    const lv = ev.some((e) => e.verified === true) ? EVID.verified : ev.length ? EVID.unverified : c.source === 'form' ? EVID.form : EVID.none;
+    return h('div', { class: 'stack', style: 'gap:2px' }, tag(lv, ev.map((e) => `${e.policyId ? `[${e.policyId}] ` : ''}${e.quote}`).join('\n') || undefined),
+      ev[0] ? h('span', { class: 'sub quote' }, `"${ev[0].quote}"`) : null,
+      c.assumption ? h('span', { class: 'sub warn' }, `가정: ${c.assumption}`) : null);
+  };
+  const addHint = async (c) => {
+    const body = S.gen.collect();
+    const text = body.form.text.trim() ? body.form.text.replace(/\s+$/, '') : v.formHeader;
+    body.form.text = `${text}\n${c.hint}`;
+    const nv = await guard(() => api('PUT', `/api/generate/${v.id}`, body));
+    if (nv) { toast('조건표에 한 줄 넣었습니다. 요소·오류 문구를 채우고 다시 조건을 뽑으세요'); S.gen.v = nv; drawGenerate(); document.getElementById('genFormText').focus(); }
+  };
+  const rows = shown.map((c) => h('tr', { class: c.review.status === 'rejected' ? 'dim' : '' },
+    h('td', { class: 'mono sub' }, c.id),
+    h('td', {}, h('input', { type: 'text', value: c.text, 'aria-label': `${c.id} 조건`, style: 'width:100%', onchange: (e) => put(c, { edits: { text: e.target.value } }, '조건을 고쳤습니다') }),
+      h('div', { class: 'sub' }, `${{ form: '조건표', spec: '기획서 규칙', 'claude-code': 'Claude Code' }[c.source]}${c.section ? ` · ${c.section}` : ''}`,
+        c.hint ? h('button', { class: 'linkish', type: 'button', onclick: () => addHint(c) }, ' · 조건표에 경계 넣기') : null)),
+    h('td', {}, sel(TECH, c.technique, (e) => put(c, { edits: { technique: e.target.value } }), `${c.id} 기법`)),
+    h('td', {}, sel(CTYPE, c.type, (e) => put(c, { edits: { type: e.target.value } }), `${c.id} 유형`)),
+    h('td', {}, sel({ P1: 'P1', P2: 'P2', P3: 'P3' }, c.priority, (e) => put(c, { edits: { priority: e.target.value } }), `${c.id} 우선순위`)),
+    h('td', { style: 'max-width:260px' }, evidenceCell(c)),
+    h('td', {}, h('div', { class: 'stack', style: 'gap:4px' }, tag(GEN_REVIEW[c.review.status]),
+      h('div', { class: 'row', style: 'gap:4px;flex-wrap:nowrap' },
+        h('button', { class: 'btn small', type: 'button', title: '승인', disabled: c.review.status === 'approved', onclick: () => put(c, { status: 'approved' }) }, '승인'),
+        h('button', { class: 'btn small', type: 'button', title: '기획 문의', disabled: c.review.status === 'inquiry', onclick: () => put(c, { status: 'inquiry' }) }, '문의'),
+        h('button', { class: 'btn small', type: 'button', title: '제외', disabled: c.review.status === 'rejected', onclick: () => put(c, { status: 'rejected' }) }, '제외'))))));
+
+  const cov = v.coverage;
+  const qText = v.questions.map((q, i) => `${i + 1}. ${q.text}${q.quote ? `\n   원문(${q.specName}): "${q.quote}"` : ''}`).join('\n');
+  const dist = (o, labels) => Object.entries(o).map(([k, n]) => `${labels[k] || k} ${n}`).join(' · ') || '-';
+  return h('section', { class: 'card stack', id: 'gen-s2' },
+    h('h3', {}, '② 테스트 조건'),
+    h('div', { class: 'sub' }, '무엇을 확인할지 먼저 정합니다. 조건을 승인해야 TC 초안을 만들 수 있습니다 (시나리오 검토 후 상세 작성).'),
+    genModes(v, call, 'conditions'),
+    v.conditions.length ? h('div', { class: 'stack' },
+      h('div', { class: 'row between' },
+        h('div', { class: 'chips' }, [['all', `전체 ${v.conditions.length}`], ['open', `검토 대기 ${pending}`], ['approved', '승인'], ['other', '문의·제외']].map(([k, t]) =>
+          h('button', { class: 'chip', type: 'button', 'aria-pressed': String(filter === k), onclick: () => { S.gen.filter = k; drawGenerate(); } }, t))),
+        h('button', { class: 'btn small primary', type: 'button', disabled: !pending, onclick: () => call('POST', '/conditions/review', { status: 'approved' }, (nv) => `${nv.changed}개를 승인했습니다`) }, `검토 대기 ${pending}개 모두 승인`)),
+      h('div', { class: 'tbl' }, h('table', { class: 'cond-tbl' },
+        h('thead', {}, h('tr', {}, ['ID', '조건', '기법', '유형', '우선', '근거', '검토'].map((t) => h('th', {}, t)))),
+        h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: 7, class: 'sub' }, '해당하는 조건이 없습니다'))))),
+      h('div', { class: 'grid2' },
+        h('div', { class: 'stack' }, h('div', { class: 'row between' }, h('b', {}, `기획 문의 ${v.questions.length}건`),
+          v.questions.length ? h('button', { class: 'btn small', type: 'button', onclick: () => copyText(qText) }, '문의 목록 복사') : null),
+        v.questions.length ? h('ul', { class: 'checks' }, v.questions.map((q) => h('li', { style: 'grid-template-columns:minmax(0,1fr)' }, h('span', {}, q.text, q.quote ? h('div', { class: 'sub quote' }, `"${q.quote}"`) : null))))
+          : h('div', { class: 'sub' }, '모호한 문장을 찾지 못했습니다')),
+        h('div', { class: 'stack' }, h('b', {}, '커버리지'),
+          cov.policies.length ? h('div', { class: 'chips' }, cov.policies.map((x) => h('span', { class: `pill ${x.conditions ? 's-Pass' : 's-none'}`, title: `조건 ${x.conditions}개` }, `${x.id} ${x.conditions}`)))
+            : h('div', { class: 'sub' }, '기획서에서 정책 번호(예: ORD-02)를 찾지 못했습니다'),
+          cov.uncovered.length ? h('div', { class: 'sub warn' }, `조건이 없는 정책: ${cov.uncovered.join(', ')}`) : null,
+          h('div', { class: 'sub' }, `승인한 조건의 기법: ${dist(cov.techniques, TECH)}`),
+          h('div', { class: 'sub' }, `유형: ${dist(cov.types, CTYPE)}`),
+          cov.types.positive && Object.values(cov.types).reduce((a, b) => a + b, 0) === cov.types.positive ? h('div', { class: 'sub warn' }, '정상 조건만 있습니다. 예외·경계 조건을 확인하세요') : null))) : null);
+}
+
+function genDraftCard(v, d, call) {
+  const ck = d.checks;
+  const put = (body, msg) => call('PUT', `/drafts/${d.id}`, body, msg);
+  const noteIn = h('input', { type: 'text', 'aria-label': `${d.id} 메모`, placeholder: '제외 사유 또는 기획 문의 내용', value: d.review.note || '', style: 'flex:1;min-width:0' });
+  const badges = ck ? [
+    tag(RUNNABLE[ck.runnable], ck.problems.join('\n') || undefined),
+    tag(EVID[ck.evidence]),
+    ck.newElements ? tag(['s-Flaky', `새 요소 ${ck.newElements}`], Object.entries(d.newElements).map(([k, e]) => `${k} ${e.label}`).join('\n')) : null,
+    ck.weak ? tag(['s-Fail', '약한 기대결과'], '확인하는 스텝이 없거나 기대결과가 "정상 동작"처럼 막연합니다') : null,
+    ck.duplicates.length ? tag(['s-Fail', `중복 의심 ${ck.duplicates[0].id} ${Math.round(ck.duplicates[0].score * 100)}%`], ck.duplicates.map((x) => `${x.id} ${x.title} (${Math.round(x.score * 100)}%)`).join('\n')) : null,
+    ck.assumptions.length ? tag(['s-Flaky', `가정 ${ck.assumptions.length}`], ck.assumptions.join('\n')) : null,
+  ] : [];
+  const conds = d.conditionIds.map((c) => v.conditions.find((x) => x.id === c)).filter(Boolean);
+  const rowKeys = d.dataSets ? [...new Set(d.dataSets.flatMap((r) => Object.keys(r.values)))] : [];
+  return h('article', { class: `draft${d.appliedAs ? ' applied' : ''}${d.review.status === 'rejected' ? ' dim' : ''}` },
+    h('div', { class: 'row between' },
+      h('div', { class: 'stack', style: 'gap:2px;flex:1;min-width:0' },
+        h('span', { class: 'mono sub' }, `${d.id} · ${GEN_METHOD[d.method]} · ${techLabel(d.technique)} · 조건 ${d.conditionIds.join(', ') || '-'}`),
+        d.appliedAs ? h('b', {}, d.title) : h('input', { type: 'text', value: d.title, 'aria-label': `${d.id} 제목`, style: 'width:100%;font-weight:600', onchange: (e) => put({ edits: { title: e.target.value } }, '제목을 고쳤습니다') })),
+      h('div', { class: 'row' },
+        d.appliedAs ? null : h('select', { 'aria-label': `${d.id} 우선순위`, onchange: (e) => put({ edits: { priority: e.target.value } }) }, ['P1', 'P2', 'P3'].map((x) => h('option', { value: x, selected: x === d.priority }, x))),
+        d.appliedAs ? h('a', { class: 'pill s-Pass', href: `#tcs/${encodeURIComponent(d.appliedAs)}` }, `${d.appliedAs}로 반영됨`) : tag(GEN_REVIEW[d.review.status]))),
+    badges.length ? h('div', { class: 'chips' }, badges) : null,
+    h('div', { class: 'sub' }, `${d.platforms.map(PL).join(', ')}${d.precondition ? ` · 사전조건: ${d.precondition}` : ''}`),
+    h('div', { class: 'grid2' },
+      d.lines.length ? h('ol', { class: 'plain-steps' }, d.lines.map((l) => h('li', {}, l)))
+        : h('div', { class: 'stack', style: 'gap:4px' }, h('div', { class: 'sub' }, '절차 (원문)'), h('pre', { class: 'srcbox' }, d.source.steps || '(비어 있음)')),
+      h('div', { class: 'stack', style: 'gap:6px' },
+        d.dataSets ? h('div', { class: 'tbl' }, h('table', {},
+          h('thead', {}, h('tr', {}, h('th', {}, `데이터 행 ${d.dataSets.length}`), rowKeys.map((k) => h('th', { class: 'mono' }, k)))),
+          h('tbody', {}, d.dataSets.map((r) => h('tr', {}, h('td', {}, r.name), rowKeys.map((k) => h('td', { class: 'mono' }, r.values[k] === '' ? '(빈 값)' : r.values[k])))))))
+          : null,
+        h('div', { class: 'sub' }, '기대결과'), h('pre', { class: 'srcbox' }, d.source.expected || '(비어 있음)'),
+        conds.length ? h('div', { class: 'sub' }, `다루는 조건: ${conds.map((c) => `${c.id} ${c.text}`).join(' / ')}`) : null)),
+    ck && (ck.problems.length || d.notes.length || ck.assumptions.length) ? h('ul', { class: 'sub notes' },
+      ck.problems.map((x) => h('li', { class: 'warn' }, x)), d.notes.map((x) => h('li', {}, x)), ck.assumptions.map((x) => h('li', {}, `가정: ${x}`))) : null,
+    d.appliedAs ? null : h('div', { class: 'row' }, noteIn,
+      h('button', { class: 'btn primary small', type: 'button', disabled: d.review.status === 'approved', onclick: () => put({ status: 'approved', note: noteIn.value }) }, '승인'),
+      h('button', { class: 'btn small', type: 'button', onclick: () => put({ status: 'inquiry', note: noteIn.value }) }, '기획 문의'),
+      h('button', { class: 'btn small', type: 'button', onclick: () => put({ status: 'rejected', note: noteIn.value }) }, '제외')));
+}
+
+function genDrafts(v, call) {
+  const st = Object.entries(v.stats).map(([m, x]) => `${GEN_METHOD[m]} ${x.approved}/${x.total} 승인${x.rejected ? ` · 제외 ${x.rejected}` : ''}`).join(' · ');
+  // 검토해도 순서가 바뀌지 않게 반영한 것만 뒤로 보낸다 (누른 카드가 다른 자리로 옮겨 가지 않도록)
+  const drafts = v.drafts.slice().sort((a, b) => Number(!!a.appliedAs) - Number(!!b.appliedAs));
+  return h('section', { class: 'card stack', id: 'gen-s3' },
+    h('div', { class: 'row between' }, h('h3', {}, '③ TC 초안'), st ? h('span', { class: 'sub' }, `채택률: ${st}`) : null),
+    h('div', { class: 'sub' }, '배지를 보고 검토하세요: 실행 가능·식별자 필요·스텝 오류, 근거, 새 요소, 약한 기대결과, 중복 의심, 가정. AI 초안은 신입 QA가 쓴 초안처럼 다룹니다.'),
+    genModes(v, call, 'drafts'),
+    drafts.length ? h('div', { class: 'stack' }, drafts.map((d) => genDraftCard(v, d, call))) : h('div', { class: 'empty' }, '아직 초안이 없습니다. ② 에서 조건을 승인한 뒤 초안을 만드세요.'));
+}
+
+function genApply(v, call) {
+  const todo = v.drafts.filter((d) => d.review.status === 'approved' && !d.appliedAs);
+  const newEls = [...new Set(todo.flatMap((d) => Object.keys(d.newElements || {})))];
+  const manual = todo.filter((d) => !d.steps.length).length;
+  return h('section', { class: 'card stack', id: 'gen-s4' },
+    h('h3', {}, '④ 반영'),
+    todo.length ? h('div', { class: 'stack' },
+      h('div', {}, `승인한 초안 ${todo.length}건을 TC로 저장합니다: `, h('span', { class: 'mono' }, v.nextIds.join(', '))),
+      h('div', { class: 'sub' }, `태그 generated, 출처(프로젝트·초안·방법·조건·승인 시각)를 TC에 남깁니다.${manual ? ` 스텝이 없는 ${manual}건은 "수동 유지"로 저장됩니다.` : ''}`),
+      newEls.length ? h('div', { class: 'notice' }, `새 요소 ${newEls.length}개를 요소 맵에 추가합니다: ${newEls.join(', ')}. 반영 후 요소 맵 화면에서 식별자를 채워야 실행됩니다.`) : null,
+      h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', onclick: async () => {
+        const out = await guard(() => api('POST', `/api/generate/${v.id}/apply`));
+        if (!out) return;
+        [S.tcs, S.elements] = await Promise.all([api('GET', '/api/tcs'), api('GET', '/api/elements')]);
+        toast(`TC ${out.tcsAdded.length}건을 저장했습니다${out.elementsAdded.length ? `, 새 요소 ${out.elementsAdded.length}개` : ''}`);
+        renderGenerate(v.id);
+      } }, `TC ${todo.length}건 반영`)))
+      : h('div', { class: 'sub' }, v.drafts.some((d) => d.appliedAs) ? '승인한 초안은 모두 반영했습니다. 저장된 TC는 TC 편집기에서 고치고 실행 현황에서 돌립니다.' : '③ 에서 초안을 승인하면 여기서 TC로 저장합니다.'));
 }
 
 // ---------- 설정 ----------

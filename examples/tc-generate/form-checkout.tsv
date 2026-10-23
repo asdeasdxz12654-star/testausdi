@@ -1,0 +1,4 @@
+필드	요소	유형	필수	최소	최대	허용값	필수 오류	규칙 오류	유효 예시
+이름	checkout.firstName	문자	Y				Error: First Name is required		Wolf
+성	checkout.lastName	문자	Y				Error: Last Name is required		Kim
+우편번호	checkout.postalCode	문자	Y				Error: Postal Code is required		06236

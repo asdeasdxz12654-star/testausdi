@@ -2,7 +2,8 @@
   "screens": {
     "screen.login": { "label": "로그인", "web": "/" },
     "screen.inventory": { "label": "상품 목록", "web": "/inventory.html" },
-    "screen.cart": { "label": "장바구니", "web": "/cart.html" }
+    "screen.cart": { "label": "장바구니", "web": "/cart.html" },
+    "screen.checkoutInfo": { "label": "결제 정보 입력", "web": "/checkout-step-one.html" }
   },
   "elements": {
     "login.id": { "label": "아이디 입력창", "web": { "testId": "username" }, "android": null, "ios": null },
@@ -20,6 +21,7 @@
     "checkout.firstName": { "label": "이름 입력창", "web": { "testId": "firstName" }, "android": null, "ios": null },
     "checkout.lastName": { "label": "성 입력창", "web": { "testId": "lastName" }, "android": null, "ios": null },
     "checkout.postalCode": { "label": "우편번호 입력창", "web": { "testId": "postalCode" }, "android": null, "ios": null },
+    "checkout.error": { "label": "결제 정보 오류 문구", "web": { "testId": "error" }, "android": null, "ios": null },
     "checkout.continue": { "label": "계속 버튼", "web": { "testId": "continue" }, "android": null, "ios": null },
     "checkout.finish": { "label": "주문 완료 버튼", "web": { "testId": "finish" }, "android": null, "ios": null },
     "checkout.completeHeader": { "label": "주문 완료 문구", "web": { "testId": "complete-header" }, "android": null, "ios": null }

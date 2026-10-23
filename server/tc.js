@@ -102,6 +102,14 @@ function validateTc(tc, { elements, flows, schemas = {} }) {
         elements: Array.isArray(tc.mapping.elements) ? tc.mapping.elements.map(String) : [],
       },
     } : {}),
+    // TC 자동 작성에서 승인·반영된 이력 (어느 프로젝트·방법·조건에서 왔는지)
+    ...(tc.generated && typeof tc.generated === 'object' ? {
+      generated: {
+        project: String(tc.generated.project || ''), draft: String(tc.generated.draft || ''), method: String(tc.generated.method || ''),
+        technique: String(tc.generated.technique || ''), conditionIds: Array.isArray(tc.generated.conditionIds) ? tc.generated.conditionIds.map(String) : [],
+        approvedAt: String(tc.generated.approvedAt || ''), appliedAt: String(tc.generated.appliedAt || ''),
+      },
+    } : {}),
     // 엑셀 원문 (가져온 TC만)
     ...(src ? {
       source: {
